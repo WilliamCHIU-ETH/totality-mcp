@@ -1,0 +1,9 @@
+*
+!requirements.lock
+!common.py
+!store.py
+!server.py
+!query_embed.py
+!import_pg.py
+!schema.sql
+!Dockerfile

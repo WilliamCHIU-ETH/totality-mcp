@@ -1,0 +1,11 @@
+{
+  "example_only_not_universal_client_schema": true,
+  "transport": "streamable-http",
+  "url": "http://127.0.0.1:8765/mcp",
+  "authorization": {
+    "type": "bearer",
+    "token_source": "Use the target client's secure credential field; do not paste a token into this file or commit it."
+  },
+  "network": "Loopback over a verified SSH tunnel, or explicit private Docker network; remote public HTTP is not supported.",
+  "tools": ["search_transcripts", "get_passage", "list_videos", "health"]
+}

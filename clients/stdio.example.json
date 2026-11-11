@@ -1,0 +1,15 @@
+{
+  "mcpServers": {
+    "transcript-evidence": {
+      "command": "/path/to/project/.venv/bin/python",
+      "args": [
+        "/path/to/project/server.py"
+      ],
+      "env": {
+        "RAG_BACKEND": "sqlite",
+        "RAG_DATA": "/path/to/your/data",
+        "RAG_ENABLE_QUERY_EMBEDDING": "0"
+      }
+    }
+  }
+}
