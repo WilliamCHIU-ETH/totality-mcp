@@ -5,6 +5,16 @@ name: Deploy
 on:
   push:
     branches: [main]
+    # Only application files reach the host; other merges do not need a deploy.
+    paths:
+      - Dockerfile
+      - .dockerignore
+      - requirements.lock
+      - common.py
+      - store.py
+      - server.py
+      - query_embed.py
+      - import_pg.py
 
 permissions:
   contents: read
