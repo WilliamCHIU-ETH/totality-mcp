@@ -4,6 +4,8 @@
 
 本庫不含真實語料或其衍生資料；測試只用明示的人造假資料。使用者須自備語料並自行確認著作權、授權及外送處理權限。**MIT 僅涵蓋本庫程式與文件，不涵蓋任何語料或第三方內容。**
 
+維護前請先閱讀 [AGENTS.md](AGENTS.md)，並在專案根目錄執行 `python3 tools/probe.py`，以即時探測結果確認分支、CI、部署與服務現況。
+
 ## 架構與安全預設
 
 - MCP 與 PostgreSQL + pgvector 是分開的服務。DB 不公開埠，MCP 使用僅有 SELECT 的 reader 角色；loader 才可取得管理 DSN。
