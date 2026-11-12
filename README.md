@@ -50,6 +50,14 @@ sh deploy/restore_verify.sh /path/to/backup.dump
 
 先在獨立測試 DB 驗還原；不刪既有資料或使用 `down -v` 當回退。新版 release 匯入後，以 `deploy/activate.py --dsn-file /path/to/owner-dsn --release <release-id>` 明確切換。
 
+## 分支與自動部署
+
+- `dev` 是開發分支，`main` 是正式環境。日常變更推到 `dev`，CI 會跑離線合成測試。
+- 要上線時開 `dev` → `main` 的 PR；`main` 受保護，只接受測試通過的 PR。
+- 合併到 `main` 後 Deploy workflow 會重跑測試，並等待 repo 擁有者在 `production` 環境核准，核准後才連到主機。
+- 主機端的部署金鑰綁定單一強制指令：只接受一個已在 `main` 上的 commit SHA，只重建並重啟 MCP 服務，健康檢查失敗即退回上一版。
+- 自動部署只更新應用程式檔（`Dockerfile`、`requirements.lock`、`*.py`）。`compose.yaml`、`schema.sql`、`deploy/`、資料、憑證與資料庫都不會被自動變更，需由操作者審查後手動處理。
+
 ## 離線合成測試
 
 ```bash
