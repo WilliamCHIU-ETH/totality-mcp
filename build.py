@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Deterministic rebuild from read-only stage-one inputs; no API calls."""
-import collections,json,os,pathlib,re,sqlite3
+import argparse,collections,json,os,pathlib,re,sqlite3
 from common import *
 os.environ.setdefault('TIKTOKEN_CACHE_DIR',str(BASE/'.cache/tiktoken'))
 ENC=None
@@ -27,7 +27,9 @@ def split_text(text,max_tokens=340):
    yield a,end,text[a:end]
    a=end
 
-def build(source=SOURCE):
+def build(source=SOURCE, *, base_release=None):
+ if base_release is not None and not re.fullmatch(r'r1-[a-f0-9]{20}',base_release):
+  raise ValueError('invalid base release ID')
  DATA.mkdir(parents=True,exist_ok=True)
  frozen={}
  def read(rel):
@@ -77,7 +79,9 @@ def build(source=SOURCE):
     actual=digest((source/rel).read_bytes())
     if actual!=r['raw_sha256']:raise ValueError('raw hash mismatch: '+rel)
     frozen[rel]=actual
- release='r1-'+digest(canonical(frozen).encode())[:20]
+ # A candidate's base is immutable. A rebuild against a new base needs a new ID.
+ release_identity=frozen if base_release is None else dict(sources=frozen,base_release=base_release)
+ release='r1-'+digest(canonical(release_identity).encode())[:20]
  output=[];coverage=collections.Counter()
  for v in videos:
   vid=v['video_id'];rel,rows=allrows[vid];units=[]
@@ -138,6 +142,7 @@ def build(source=SOURCE):
  write_json(DATA/'videos.json',videos);write_json(DATA/'sources.json',dict(release_id=release,sha256=frozen,stage_one_hashes_verified=verified))
  unique={c['content_sha256']:c for c in output};tokens=sum(c['token_count'] for c in unique.values())
  report=dict(release_id=release,videos=len(videos),chunks=len(output),unique_embedding_texts=len(unique),source_counts=dict(rowcounts),pending_cards=len(pending),pending_cards_mapped=len(pending_seen),corrected_source_records=len(corrections),source_files=len(frozen),quality_flag_files=quality_files,source_quality_item_flag_counts=dict(quality_counts),stage_one_hashes_verified=verified,chunk_tokens=sum(c['token_count'] for c in output),uncached_tokens=tokens,estimated_usd=tokens*0.02/1e6,retry_reserved_usd=tokens*0.02/1e6*3,budget_usd=1,model=MODEL,dimensions=DIM,chunks_sha256=digest((DATA/'chunks.jsonl').read_bytes()),flag_chunk_counts=dict(collections.Counter(f for c in output for f in c['quality_flags'])),max_chunk_tokens=max(c['token_count'] for c in output),notes=['350 token ceiling; sentence/row-boundary overlap up to 50 tokens, may be zero for long units','Source text is not audio verified; estimated time is not precise alignment'])
+ if base_release is not None:report['base_release']=base_release
  if report['retry_reserved_usd']>1:raise ValueError('dry-run exceeds budget')
  write_json(DATA/'build-manifest.json',report)
  # SQLite is an explicitly local test backend, not the production DB.
@@ -148,4 +153,11 @@ def build(source=SOURCE):
   db.execute('INSERT INTO chunks VALUES(?,?,?,?,?)',(c['chunk_id'],c['video_id'],c['text'],canonical(c['quality_flags']),canonical(c)))
   db.execute('INSERT INTO keywords VALUES(?,?)',(c['chunk_id'],' '.join(terms(index_text(c)))))
  db.commit();db.close();print(json.dumps(report,ensure_ascii=False,indent=2))
-if __name__=='__main__':build()
+def main():
+ parser=argparse.ArgumentParser(description=__doc__)
+ parser.add_argument('--base-release',help='Current active release ID for a publication candidate')
+ args=parser.parse_args()
+ try:build(SOURCE,base_release=args.base_release)
+ except ValueError as exc:parser.error(str(exc))
+
+if __name__=='__main__':main()

@@ -54,6 +54,7 @@ jobs:
         if: ${{ github.event_name == 'pull_request' || github.ref == 'refs/heads/dev' }}
         env:
           TOTALITY_CI_PG_PORT: ${{ job.services.postgres.ports[5432] }}
+          PYTHONPATH: tests
         run: python -m unittest discover -s tests/integration -p postgres_release_checks.py -v
       - name: Probe script compiles
         run: python -m py_compile tools/probe.py

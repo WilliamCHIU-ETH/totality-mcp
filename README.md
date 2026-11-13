@@ -26,6 +26,8 @@ python3 -m venv .venv
 RAG_SOURCE=/path/to/corpus RAG_DATA=/path/to/new-data .venv/bin/python build.py
 ```
 
+首次發布到空庫或僅做本地建置時可省略 `--base-release`。若要發布到已有啟用版本的資料庫，在上述建置命令加上 `--base-release <current-release-id>`。建置會將基準寫入候選 manifest，後續匯入時保留；以同一批來源改用不同基準重建時，會產生新的 release ID。
+
 建置使用 tiktoken 的 `cl100k_base`，首次 tokenizer 初始化可能下載公開編碼資料；離線使用前須自行備妥快取。切片上限 350 tokens，邊界重疊最多 50 tokens，保留來源、未核時序與待判版本。不要在正在服務的 release 上重建。
 
 向量建置與自動 query embedding 都可能外送文字並產生費用，必須先取得批准。本庫不提供 API key。若要執行，明確設定 `RAG_OPENAI_KEY_FILE=/path/to/key-file`；未設定不得讀取任何預設憑證庫。`embed.py --dry-run` 不發送 API；`--cache-only` 在快取不足時必須停止。自動查詢 adapter 預設關閉，需明確設定 `RAG_ENABLE_QUERY_EMBEDDING=1` 才啟用，並使用獨立可寫 `RAG_QUERY_LEDGER_DIR`。本程式的本地預留帳本不是供應商帳戶 spending cap；費率常數不是現行報價保證。
@@ -82,4 +84,4 @@ PYTHONDONTWRITEBYTECODE=1 OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 .venv/bin/pyt
 
 ## 版本與狀態
 
-此為服務程式的泛化來源版本，release ID 由自備輸入的雜湊產生，不固定指向作者的私人語料版本。依作者提供的狀態，正式部署已在作者環境驗證；本次清理未連線重新驗證該環境。**本 repo 的第三方依賴授權與公開服務安全性未經完整審查。** `requirements.lock` 的版本與映像 digest 不是授權或無漏洞證明。MIT 授權見 `LICENSE`，不擴張到資料與第三方元件。
+此為服務程式的泛化來源版本，release ID 由自備輸入及選填的發布基準雜湊產生，不固定指向作者的私人語料版本。依作者提供的狀態，正式部署已在作者環境驗證；本次清理未連線重新驗證該環境。**本 repo 的第三方依賴授權與公開服務安全性未經完整審查。** `requirements.lock` 的版本與映像 digest 不是授權或無漏洞證明。MIT 授權見 `LICENSE`，不擴張到資料與第三方元件。

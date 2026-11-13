@@ -1,12 +1,21 @@
 """Exercise the release migration against an ephemeral PostgreSQL + pgvector database."""
 
+import json
 import os
+import subprocess
+import sys
 import unittest
 from pathlib import Path
+from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
 import psycopg
 from psycopg import errors
+from psycopg.conninfo import make_conninfo
 from psycopg.types.json import Jsonb
+
+import build
+from synthetic import CharacterTokenizer, add_vectors, make_source
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -140,3 +149,56 @@ class PostgresReleaseTests(unittest.TestCase):
 
         with connect("rag_runtime") as reader:
             self.assertEqual(reader.execute("SELECT release_id FROM rag.active_release").fetchall(), [(NEXT,)])
+
+    def test_build_import_and_publish_against_existing_release(self):
+        with connect("rag_runtime") as reader:
+            base = reader.execute("SELECT release_id FROM rag.active_release").fetchone()[0]
+
+        def restore_active_release():
+            with connect("postgres") as db:
+                db.execute("UPDATE rag.active_release SET release_id = %s WHERE singleton", (base,))
+
+        self.addCleanup(restore_active_release)
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = make_source(root / "source")
+            data = root / "data"
+            with (
+                patch.object(build, "DATA", data),
+                patch.object(build, "SOURCE", source),
+                patch.object(build, "CONTEXT", "context"),
+                patch.object(build, "ENC", CharacterTokenizer()),
+                patch.object(sys, "argv", ["build.py", "--base-release", base]),
+            ):
+                build.main()
+            candidate = json.loads((data / "build-manifest.json").read_text(encoding="utf-8"))
+            self.assertEqual(candidate["base_release"], base)
+            release = candidate["release_id"]
+            add_vectors(data)
+
+            dsn = root / "loader.dsn"
+            dsn.write_text(make_conninfo(
+                host="127.0.0.1", port=os.environ["TOTALITY_CI_PG_PORT"], dbname="totality_ci",
+                user="rag_ingest", password="ci-only-password", connect_timeout=5,
+            ), encoding="utf-8")
+            env = dict(os.environ, RAG_DATA=str(data))
+            subprocess.run(
+                [sys.executable, "import_pg.py", "--dsn-file", str(dsn)],
+                cwd=ROOT, env=env, check=True, timeout=30,
+            )
+            with connect("rag_runtime") as reader:
+                self.assertEqual(reader.execute(
+                    "SELECT manifest, sealed FROM rag.releases WHERE release_id = %s", (release,)
+                ).fetchone(), (candidate, True))
+                self.assertEqual(reader.execute("SELECT release_id FROM rag.active_release").fetchall(), [(base,)])
+
+            subprocess.run(
+                [sys.executable, "deploy/activate.py", "--dsn-file", str(dsn),
+                 "--release", release, "--expected-base-release", base],
+                cwd=ROOT, env=env, check=True, timeout=30,
+            )
+            with connect("rag_runtime") as reader:
+                self.assertEqual(reader.execute("SELECT release_id FROM rag.active_release").fetchall(), [(release,)])
+                self.assertEqual(reader.execute(
+                    "SELECT count(*) FROM rag.chunks WHERE release_id = %s", (release,)
+                ).fetchone(), (candidate["chunks"],))
