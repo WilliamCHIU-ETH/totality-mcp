@@ -5,8 +5,7 @@ from common import *
 class Store:
  def __init__(self):
   self.backend=os.environ.get('RAG_BACKEND','sqlite')
-  self.manifest=load(DATA/'build-manifest.json');self.videos={v['video_id']:v for v in load(DATA/'videos.json')}
-  self.release=self.manifest['release_id'];self.index_vectors=None
+  self.manifest={};self.videos={};self.release=None;self.index_vectors=None
   if self.backend=='postgres':
    import psycopg
    from pgvector.psycopg import register_vector
@@ -15,21 +14,38 @@ class Store:
    self.db=psycopg.connect(pathlib.Path(dsnfile).read_text().strip(),autocommit=True,options='-c default_transaction_read_only=on -c statement_timeout=3000')
    register_vector(self.db)
    row=self.db.execute('SELECT rolsuper,rolcreaterole,rolcreatedb,rolreplication,rolbypassrls FROM pg_roles WHERE rolname=current_user').fetchone()
-   if not row or any(row):raise RuntimeError('service DB role must not be privileged')
-   priv=self.db.execute("SELECT has_table_privilege(current_user,'rag.chunks','INSERT,UPDATE,DELETE,TRUNCATE')").fetchone()[0]
-   if priv:raise RuntimeError('service DB role has write privilege')
-   active=self.db.execute('SELECT r.release_id,r.manifest FROM rag.active_release a JOIN rag.releases r USING(release_id) WHERE a.singleton=true').fetchone()
-   if not active:raise RuntimeError('no active release; import/activate first')
-   self.release,self.manifest=active
+   if not row or any(row):
+    self.db.close()
+    raise RuntimeError('service DB role must not be privileged')
+   priv=self.db.execute("SELECT has_table_privilege(current_user,'rag.chunks','INSERT,UPDATE,DELETE,TRUNCATE') OR has_table_privilege(current_user,'rag.releases','INSERT,UPDATE,DELETE,TRUNCATE') OR has_table_privilege(current_user,'rag.active_release','INSERT,UPDATE,DELETE,TRUNCATE') OR has_function_privilege(current_user,'rag.activate_release(text,text,boolean,boolean)','EXECUTE') OR has_function_privilege(current_user,'rag.stage_release(jsonb,jsonb)','EXECUTE')").fetchone()[0]
+   if priv:
+    self.db.close()
+    raise RuntimeError('service DB role has write or publication privilege')
+   try:self.refresh()
+   except Exception:
+    self.db.close();raise
   elif self.backend=='sqlite':
+   self.manifest=load(DATA/'build-manifest.json');self.videos={v['video_id']:v for v in load(DATA/'videos.json')}
+   self.release=self.manifest['release_id']
    self.db=sqlite3.connect((DATA/'local.sqlite').as_uri()+'?mode=ro',uri=True,check_same_thread=False)
    self.db.execute('PRAGMA query_only=ON')
   else:raise ValueError('unsupported backend')
- def rows(self,video_id=None):
+ def refresh(self):
+  # One joined read pins immutable chunks AND metadata to the same release.
+  # Missing DB metadata is an error, never a fallback to stale local files.
+  if self.backend=='postgres':
+   active=self.db.execute('SELECT r.release_id,r.manifest,r.videos FROM rag.active_release a JOIN rag.releases r USING(release_id) WHERE a.singleton=true').fetchone()
+   if not active or active[2] is None:raise RuntimeError('active release metadata missing; owner migration/backfill required')
+   release,manifest,videos=active
+   if len(videos)!=manifest['videos']:raise RuntimeError('invalid release metadata')
+   self.release,self.manifest,self.videos=release,manifest,{v['video_id']:v for v in videos}
+ def rows(self,video_id=None,refresh=True):
+  if refresh:self.refresh()
   if self.backend=='postgres':
    return [r[0] for r in self.db.execute('SELECT payload FROM rag.chunks WHERE release_id=%s AND (%s::text IS NULL OR video_id=%s)',(self.release,video_id,video_id))]
   return [json.loads(r[0]) for r in self.db.execute('SELECT payload FROM chunks WHERE (? IS NULL OR video_id=?)',(video_id,video_id))]
  def get(self,cid):
+  self.refresh()
   if not re.fullmatch(r'c_[a-f0-9]{64}',cid):return None
   if self.backend=='postgres':
    r=self.db.execute('SELECT payload FROM rag.chunks WHERE chunk_id=%s AND release_id=%s',(cid,self.release)).fetchone()
@@ -37,6 +53,7 @@ class Store:
   r=self.db.execute('SELECT payload FROM chunks WHERE id=?',(cid,)).fetchone();return json.loads(r[0]) if r else None
  def search(self,query,limit=5,video_id=None,exclude_flags=None,query_vector=None):
   exclude_flags=exclude_flags or [];checked_query(query,limit,video_id,exclude_flags)
+  self.refresh()
   if video_id and video_id not in self.videos:return dict(status='unknown_video',results=[],filtered_count=0)
   qt=terms(query)[:128]
   vector_status='not_requested_no_external_api'
@@ -49,10 +66,7 @@ class Store:
    if vec.shape!=(DIM,) or not np.isfinite(vec).all() or np.linalg.norm(vec)==0:raise ValueError('query_vector must be 1536 finite nonzero values')
   else:vec=None
   # SQL filtering is parameterized. Never interpret source text as a command.
-  if self.backend=='postgres':
-   active=self.db.execute('SELECT r.release_id,r.manifest FROM rag.active_release a JOIN rag.releases r USING(release_id) WHERE a.singleton=true').fetchone()
-   if active:self.release,self.manifest=active
-  candidates=self.rows(video_id);filtered=[c for c in candidates if set(c['quality_flags'])&set(exclude_flags)]
+  candidates=self.rows(video_id,refresh=False);filtered=[c for c in candidates if set(c['quality_flags'])&set(exclude_flags)]
   allowed={c['chunk_id']:c for c in candidates if not set(c['quality_flags'])&set(exclude_flags)}
   keyword=[]
   if qt:

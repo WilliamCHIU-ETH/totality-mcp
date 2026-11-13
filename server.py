@@ -31,17 +31,22 @@ def search_transcripts(query:str,limit:int=5,video_id:str|None=None,exclude_flag
 @mcp.tool(annotations=READ)
 def get_passage(chunk_id:str)->dict:
  """Return immutable corrected evidence, original ASR rows, source hashes, pending alternatives and program-generated conservative citation. Unknown/invalid IDs return not_found."""
- c=store().get(chunk_id)
- return bounded(dict(status='ok',passage=store().public(c)) if c else dict(status='not_found'))
+ with _retrieval_lock:
+  s=store();c=s.get(chunk_id)
+  return bounded(dict(status='ok',passage=s.public(c)) if c else dict(status='not_found'))
 @mcp.tool(annotations=READ)
 def list_videos(limit:int=10,offset:int=0)->dict:
- """List frozen manifest metadata, at most 20 videos per call."""
- if type(limit)!=int or not 1<=limit<=20 or type(offset)!=int or not 0<=offset<=100:raise ValueError('invalid pagination')
- s=store();return dict(total=len(s.videos),videos=list(s.videos.values())[offset:offset+limit],release_id=s.release)
+ """List active-release metadata, at most 20 videos per call."""
+ if type(limit)!=int or not 1<=limit<=20 or type(offset)!=int or not 0<=offset<=1000000:raise ValueError('invalid pagination')
+ with _retrieval_lock:
+  s=store();s.refresh()
+  return dict(total=len(s.videos),videos=list(s.videos.values())[offset:offset+limit],release_id=s.release)
 @mcp.tool(annotations=READ)
 def health()->dict:
  """Version/count status only; never returns secrets, DSNs or environment."""
- s=store();return dict(status='ok',backend=s.backend,release_id=s.release,videos=len(s.videos),chunks=s.manifest['chunks'],model=MODEL,dimensions=DIM,read_only=True,audio_verified=False,server_answer_model=False,automatic_query_api=os.environ.get('RAG_ENABLE_QUERY_EMBEDDING')=='1')
+ with _retrieval_lock:
+  s=store();s.refresh()
+  return dict(status='ok',backend=s.backend,release_id=s.release,videos=len(s.videos),chunks=s.manifest['chunks'],model=MODEL,dimensions=DIM,read_only=True,audio_verified=False,server_answer_model=False,automatic_query_api=os.environ.get('RAG_ENABLE_QUERY_EMBEDDING')=='1')
 
 class PrivateGate:
  def __init__(self,app,token):self.app=app;self.token=token

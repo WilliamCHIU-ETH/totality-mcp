@@ -41,5 +41,5 @@ jobs:
       - name: Compose file is valid
         run: |
           mkdir -p .secrets
-          for f in pg_password reader_password reader_dsn owner_dsn mcp_token; do : > ".secrets/$f"; done
+          for f in pg_password reader_password loader_password reader_dsn loader_dsn owner_dsn mcp_token; do : > ".secrets/$f"; done
           docker compose config --quiet

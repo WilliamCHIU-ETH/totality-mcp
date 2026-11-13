@@ -1,7 +1,7 @@
 """CPU-light regression tests using only invented numbered test sentences."""
 import json,pathlib,sqlite3,sys
 import numpy as np,pytest
-import common,build,store,query_embed
+import common,build,store,query_embed,server
 from synthetic import make_source,add_vectors,CharacterTokenizer
 
 @pytest.fixture
@@ -134,3 +134,131 @@ def test_release_activation_format(sample):
  patterns=[n.args[0].value for n in ast.walk(tree) if isinstance(n,ast.Call) and isinstance(n.func,ast.Attribute) and n.func.attr=='fullmatch' and n.args and isinstance(n.args[0],ast.Constant)]
  assert len(patterns)==1
  assert re.fullmatch(patterns[0],json.loads((data/'build-manifest.json').read_text())['release_id'])
+ assert not re.fullmatch(patterns[0],'invalid')
+
+class FakePG:
+ """In-memory SQL boundary double; never connects or contains real sources."""
+ def __init__(self,release,manifest,videos,chunks):
+  self.active=(release,manifest,videos);self.chunks=chunks;self.result=[];self.reads=0
+ def execute(self,sql,args=()):
+  if 'JOIN rag.releases' in sql:
+   self.result=[self.active] if self.active else [];self.reads+=1
+  elif 'SELECT payload' in sql:
+   if 'chunk_id=' in sql:self.result=[(c,) for c in self.chunks if c['chunk_id']==args[0] and c['release_id']==args[1]]
+   else:self.result=[(c,) for c in self.chunks if c['release_id']==args[0] and (args[1] is None or c['video_id']==args[1])]
+  elif 'to_tsquery' in sql:self.result=[]
+  else:raise AssertionError('unexpected synthetic SQL')
+  return self
+ def fetchone(self):return self.result[0] if self.result else None
+ def __iter__(self):return iter(self.result)
+
+def test_pg_metadata_switch_rollback_and_filtered_search(sample,monkeypatch):
+ _,_,chunks=sample
+ old='r1-'+'1'*20;new='r1-'+'2'*20
+ a=dict(chunks[0],release_id=old);b=dict(chunks[2],release_id=new)
+ videos=[dict(video_id=a['video_id']),dict(video_id=b['video_id'])]
+ s=object.__new__(store.Store);s.backend='postgres';s.videos={};s.release=None;s.index_vectors=None
+ s.db=FakePG(old,dict(videos=1,chunks=1),videos[:1],[a,b]);s.refresh()
+ assert list(s.videos)==[a['video_id']]
+ assert s.search(b['text'],video_id=b['video_id'])['status']=='unknown_video'
+ s.db.active=(new,dict(videos=2,chunks=1),videos)
+ # Refresh must precede membership validation, not follow it.
+ result=s.search(b['text'],video_id=b['video_id'])
+ assert result['results'][0]['chunk_id']==b['chunk_id'] and result['release_id']==new
+ assert s.get(b['chunk_id'])==b and len(s.videos)==2
+ s.db.active=(old,dict(videos=1,chunks=1),videos[:1])
+ assert s.get(b['chunk_id']) is None and len(s.videos)==1
+ assert s.search(b['text'],video_id=b['video_id'])['status']=='unknown_video'
+ s.db.active=(new,dict(videos=2,chunks=1),None)
+ with pytest.raises(RuntimeError,match='metadata missing'):s.refresh()
+ s.db.active=None
+ with pytest.raises(RuntimeError,match='metadata missing'):s.refresh()
+
+def test_search_pins_once_even_if_pointer_changes(sample):
+ _,_,chunks=sample
+ old='r1-'+'1'*20;new='r1-'+'2'*20;c=dict(chunks[0],release_id=old)
+ s=object.__new__(store.Store);s.backend='postgres';s.videos={};s.release=None;s.index_vectors=None
+ class SwitchingPG(FakePG):
+  def execute(self,sql,args=()):
+   result=super().execute(sql,args)
+   if 'JOIN rag.releases' in sql:self.active=(new,dict(videos=0,chunks=0),[])
+   return result
+ s.db=SwitchingPG(old,dict(videos=1,chunks=1),[dict(video_id=c['video_id'])],[c])
+ result=s.search(c['text'],video_id=c['video_id'])
+ assert result['release_id']==old and result['results'][0]['chunk_id']==c['chunk_id']
+ assert s.db.reads==1
+
+def test_server_pg_list_health_follow_same_metadata(sample,monkeypatch):
+ _,_,chunks=sample
+ old='r1-'+'1'*20;new='r1-'+'2'*20
+ videos=[dict(video_id=c['video_id']) for c in [chunks[0],chunks[2]]]
+ s=object.__new__(store.Store);s.backend='postgres';s.release=None;s.videos={};s.manifest={}
+ s.db=FakePG(old,dict(videos=1,chunks=1),videos[:1],[])
+ monkeypatch.setattr(server,'_store',s)
+ assert server.health()['videos']==1 and server.list_videos()['release_id']==old
+ s.db.active=(new,dict(videos=2,chunks=2),videos)
+ assert server.list_videos()['total']==2 and server.health()['release_id']==new
+ s.db.active=(old,dict(videos=1,chunks=1),videos[:1])
+ assert server.list_videos()['total']==1 and server.health()['chunks']==1
+
+def test_activation_common_cas_parameters():
+ from import_pg import activate_release
+ class DB:
+  def execute(self,sql,args):self.sql,self.args=sql,args
+ db=DB();activate_release(db,'candidate','expected',False,True)
+ assert db.args==('candidate','expected',False,True)
+ assert 'rag.activate_release' in db.sql
+
+def test_import_no_ddl_and_integrity(sample,monkeypatch):
+ import import_pg
+ _,data,_=sample;monkeypatch.setattr(import_pg,'DATA',data)
+ class Result:
+  def fetchone(self):return (False,)
+ class DB:
+  def __enter__(self):return self
+  def __exit__(self,*a):return False
+  def execute(self,sql,args=()):
+   assert not any(x in sql.upper() for x in ['CREATE ','DELETE ','DROP ','ALTER '])
+   calls.append((sql,args));return Result()
+ calls=[];monkeypatch.setattr(import_pg.psycopg,'connect',lambda *a,**kw:DB())
+ monkeypatch.setattr(import_pg,'register_vector',lambda *a:None)
+ dsn=data/'fake-secret';dsn.write_text('synthetic-only')
+ import_pg.run(dsn,True,None,True)
+ assert sum('rag.put_chunk' in sql for sql,args in calls)==4
+ assert calls[-1][1][-2:]==(True,False)
+ (data/'chunks.jsonl').write_text('tampered')
+ with pytest.raises((ValueError,json.JSONDecodeError)):import_pg.run(dsn)
+
+def test_release_schema_and_deployment_contract():
+ import yaml
+ schema=(common.BASE/'schema.sql').read_text()
+ migration=(common.BASE/'deploy/migrate-release-v2.sql').read_text()
+ assert schema.endswith(migration)
+ assert 'pg_advisory_xact_lock' in migration and 'CAS base mismatch' in migration
+ assert 'candidate base mismatch' in migration and 'initial activation requires' in migration
+ assert 'SECURITY DEFINER SET search_path=' in migration
+ assert 'FROM PUBLIC' in migration and 'TO rag_loader' in migration
+ assert 'OWNER TO rag_owner' in migration
+ c=yaml.safe_load((common.BASE/'compose.yaml').read_text())
+ assert c['services']['loader']['secrets']==['loader_dsn']
+ assert '--activate' not in c['services']['loader']['command']
+ # yaml 1.1 treats 'on' as boolean; account for both parsers.
+ deploy=yaml.safe_load((common.BASE/'.github/workflows/deploy.yml').read_text())
+ trigger=deploy.get('on',deploy.get(True))
+ assert {'store.py','server.py','import_pg.py'}<=set(trigger['push']['paths'])
+ docker=(common.BASE/'Dockerfile').read_text()
+ assert all(name in docker for name in ['store.py','server.py','import_pg.py'])
+ ci=(common.BASE/'.github/workflows/ci.yml').read_text()
+ assert 'loader_password' in ci and 'loader_dsn' in ci
+
+def test_server_list_and_health_refresh(sample,monkeypatch):
+ import server
+ _,_,chunks=sample;s=store.Store();monkeypatch.setattr(server,'_store',s)
+ try:
+  assert server.list_videos()['total']==2
+  assert server.list_videos(offset=101)['videos']==[]
+  assert server.health()['videos']==2
+  assert server.get_passage(chunks[0]['chunk_id'])['status']=='ok'
+  for offset in [-1,1000001]:
+   with pytest.raises(ValueError):server.list_videos(offset=offset)
+ finally:s.db.close()

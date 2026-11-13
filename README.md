@@ -8,7 +8,7 @@
 
 ## 架構與安全預設
 
-- MCP 與 PostgreSQL + pgvector 是分開的服務。DB 不公開埠，MCP 使用僅有 SELECT 的 reader 角色；loader 才可取得管理 DSN。
+- MCP 與 PostgreSQL + pgvector 是分開的服務。DB 不公開埠，MCP 使用僅有 SELECT 的 reader 角色；loader 僅能透過受限函式建立／封存候選及 CAS 切版，不取得 owner DSN、DDL 或刪除權限。
 - SQLite + NumPy 為離線工程測試 backend。stdio 繼承本地啟動者權限，不提供多人隔離。
 - HTTP 必須提供至少 32 bytes 的 Bearer token，預設 host 綁 `127.0.0.1`。Compose 容器內的監聽不同於 host publication：host 只發佈 `127.0.0.1:8765`。
 - Host 必須符合 allowlist；如有 Origin 也須符合 allowlist。不因公開程式碼而開放服務埠或取消認證。
@@ -40,6 +40,8 @@ python3 deploy/prepare_host.py
 docker compose config --quiet
 docker compose up -d rag-db
 docker compose --profile import run --rm loader
+# Empty database only: explicitly approve the first activation.
+docker compose --profile import run --rm loader --dsn-file /run/secrets/loader_dsn --activate --allow-initial
 docker compose up -d rag-mcp
 ```
 
@@ -50,7 +52,17 @@ sh deploy/backup.sh
 sh deploy/restore_verify.sh /path/to/backup.dump
 ```
 
-先在獨立測試 DB 驗還原；不刪既有資料或使用 `down -v` 當回退。新版 release 匯入後，以 `deploy/activate.py --dsn-file /path/to/owner-dsn --release <release-id>` 明確切換。
+先在獨立測試 DB 驗還原；不刪既有資料或使用 `down -v` 當回退。新版 release 匯入後，以 `deploy/activate.py --dsn-file /path/to/loader-dsn --release <release-id> --expected-base-release <current-release-id>` 明確切換。候選 manifest 的 `base_release` 必須等於目前 active；空庫才可用 `--allow-initial`。回退保留版需額外明示 `--rollback`，仍必須提供目前版的 CAS；回退不是刪除或備份。
+
+### 既有庫升級：需要手動步驟
+
+1. 先備份，在隔離庫演練；以具備角色管理權的部署 owner／DBA 執行 `deploy/migrate-release-v2.sql`（可重跑）；角色 bootstrap 與權限收斂需要 DBA，日常 schema DDL 則由 `rag_owner` 擁有。`rag_owner` 為 NOLOGIN 物件擁有者；由 DBA 明確授予 migration 登入身分所需會員資格，不授予 loader/runtime。
+2. 以 owner 執行 `deploy/backfill-videos.py --dsn-file /path/to/owner-dsn --release <existing-release-id> --videos-file /path/to/existing-videos.json`，驗證影片集合與片段一致。未回填會 fail closed，不會退用本地舊 metadata。
+3. 為既有 reader 登入保留 `rag_reader`；為獨立 ingest 登入授予 `rag_loader`。無 superuser、CREATEROLE、CREATEDB、DDL 或直接表格寫入；另核對登入身分沒有繼承其他高權限角色。新建空庫的角色／密碼設定見 `deploy/init-reader.sh`，不是既有庫密碼輪替工具。
+4. 更新 Compose 的 loader secrets：`loader_password`、`loader_dsn`。`owner_dsn` 僅供操作者 migration／備份，不掛入 loader。服務 `requirements.lock` 不含 STT worker 依賴，入庫 worker 使用獨立 venv。
+5. 再部署應用程式。Postgres 模式以 DB 的每版 `videos` 與 `manifest` 為準，不依賴啟動時本地 JSON；每個工具呼叫先讀同一個 active 指標，固定該次查詢版本，切版／回退不需重啟 MCP。不同工具呼叫間可能跨版；舊 chunk ID 在非當前版回 `not_found`。
+
+匯入不再自動執行 DDL，也不自動啟用。完整產物需包含 `videos.json`；舊版 metadata 回填必須先於新應用部署。程式部署與資料發布是兩個獨立批准閘門。
 
 ## 分支與自動部署
 

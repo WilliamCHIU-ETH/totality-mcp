@@ -7,7 +7,7 @@ services:
       POSTGRES_DB: totality
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD_FILE: /run/secrets/pg_password
-    secrets: [pg_password, reader_password]
+    secrets: [pg_password, reader_password, loader_password]
     volumes:
       - rag_pgdata:/var/lib/postgresql/data
       - ./schema.sql:/docker-entrypoint-initdb.d/10-schema.sql:ro
@@ -60,9 +60,9 @@ services:
     build: .
     platform: linux/arm64
     entrypoint: [python, /app/import_pg.py]
-    command: [--dsn-file, /run/secrets/owner_dsn, --activate]
+    command: [--dsn-file, /run/secrets/loader_dsn]
     environment: {RAG_DATA: /app/data}
-    secrets: [owner_dsn]
+    secrets: [loader_dsn]
     volumes: ['./data:/app/data:ro']
     networks: [db_internal]
     depends_on:
@@ -84,4 +84,6 @@ secrets:
   reader_password: {file: ./.secrets/reader_password}
   reader_dsn: {file: ./.secrets/reader_dsn}
   owner_dsn: {file: ./.secrets/owner_dsn}
+  loader_password: {file: ./.secrets/loader_password}
+  loader_dsn: {file: ./.secrets/loader_dsn}
   mcp_token: {file: ./.secrets/mcp_token}

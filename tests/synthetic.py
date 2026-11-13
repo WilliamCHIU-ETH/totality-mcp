@@ -3,7 +3,7 @@ No sampled text, identifiers, source fingerprints, or model embeddings.
 """
 import hashlib,json,pathlib,sqlite3
 import numpy as np
-from common import canonical,DIM,MODEL
+from common import canonical,digest,DIM,MODEL
 
 def write(path,value):
  path.parent.mkdir(parents=True,exist_ok=True)
@@ -17,7 +17,7 @@ def make_source(root):
  root=pathlib.Path(root);videos=[];pending=[]
  for v in range(1,3):
   vid=f'FAKEVID{v:04d}'
-  videos.append(dict(video_id=vid,title=f'測試影片 {v:03d}',duration_s=30,url=f'https://example.invalid/video/{vid}'))
+  videos.append(dict(video_id=vid,title=f'測試影片 {v:03d}',duration_s=30,url=f'https://example.invalid/watch?v={vid}'))
   rows=[];original=[];chunks=[]
   for row in range(2):
    number=(v-1)*2+row+1;cid=f'fixture-source-{number:03d}'
@@ -37,7 +37,7 @@ def make_source(root):
  write(root/'context/pending.json',pending)
  write(root/'context/corrections.json',[])
  write(root/'context/normalization.json',{'policy':'synthetic-only'})
- hashes={str(p.relative_to(root)):hashlib.sha256(p.read_bytes()).hexdigest() for p in sorted(root.rglob('*')) if p.is_file()}
+ hashes={str(p.relative_to(root)):hashlib.sha256(p.read_bytes()).hexdigest() for p in sorted(root.rglob('*')) if p.is_file() and p!=root/'context/source-sha256.json'}
  write(root/'context/source-sha256.json',hashes)
  return root
 
@@ -50,5 +50,5 @@ def add_vectors(data):
  db.execute('CREATE TABLE cache(hash TEXT,model TEXT,dim INT,vec BLOB,PRIMARY KEY(hash,model,dim))')
  for c,v in zip(chunks,vectors):db.execute('INSERT INTO cache VALUES(?,?,?,?)',(c['content_sha256'],MODEL,DIM,v.tobytes()))
  db.commit();db.close()
- write(data/'embedding-manifest.json',dict(synthetic_fixture=True,conservative_reserved_usd=0,model=MODEL,dimensions=DIM))
+ write(data/'embedding-manifest.json',dict(synthetic_fixture=True,conservative_reserved_usd=0,model=MODEL,dimensions=DIM,vectors_sha256=digest((data/'vectors.npy').read_bytes()),vector_ids_sha256=digest((data/'vector-ids.json').read_bytes())))
  return chunks
