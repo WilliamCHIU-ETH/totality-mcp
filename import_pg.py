@@ -1,26 +1,43 @@
 #!/usr/bin/env python3
-"""Transactional, idempotent production import. Owner DSN only from a secret file."""
+"""Transactional candidate import. DDL is a separate owner-only step."""
 import argparse,json,pathlib
 import numpy as np,psycopg
 from psycopg.types.json import Jsonb
 from pgvector.psycopg import register_vector
 from common import *
-def run(dsnfile,activate=False):
- dsn=pathlib.Path(dsnfile).read_text().strip()
- chunks=[json.loads(l) for l in (DATA/'chunks.jsonl').read_text().splitlines()];manifest=load(DATA/'build-manifest.json');ids=load(DATA/'vector-ids.json');vectors=np.load(DATA/'vectors.npy')
- em=load(DATA/'embedding-manifest.json')
- assert digest((DATA/'vectors.npy').read_bytes())==em['vectors_sha256']
- assert digest((DATA/'chunks.jsonl').read_bytes())==manifest['chunks_sha256']
- assert vectors.shape==(len(chunks),DIM) and len(ids)==len(set(ids))
- assert ids==[c['chunk_id'] for c in chunks] and np.isfinite(vectors).all()
- with psycopg.connect(dsn) as db:
-  db.execute((BASE/'schema.sql').read_text());register_vector(db)
-  db.execute('INSERT INTO rag.releases(release_id,manifest) VALUES(%s,%s) ON CONFLICT(release_id) DO NOTHING',(manifest['release_id'],Jsonb(manifest)))
-  for c,vec in zip(chunks,vectors):
-   db.execute("INSERT INTO rag.chunks(chunk_id,release_id,video_id,content_sha256,model,dimensions,payload,keywords,embedding) VALUES(%s,%s,%s,%s,%s,%s,%s,to_tsvector('simple',%s),%s) ON CONFLICT(chunk_id) DO NOTHING",(c['chunk_id'],c['release_id'],c['video_id'],c['content_sha256'],MODEL,DIM,Jsonb(c),' '.join(terms(index_text(c))),vec))
-  count=db.execute('SELECT count(*) FROM rag.chunks WHERE release_id=%s',(manifest['release_id'],)).fetchone()[0]
-  assert count==len(chunks)
-  if activate:db.execute('INSERT INTO rag.active_release VALUES(true,%s) ON CONFLICT(singleton) DO UPDATE SET release_id=excluded.release_id',(manifest['release_id'],))
- print(json.dumps(dict(imported=count,release_id=manifest['release_id'],activated=activate)))
+
+def activate_release(db,release,expected_base_release=None,allow_initial=False,rollback=False):
+ db.execute('SELECT rag.activate_release(%s,%s,%s,%s)',(release,expected_base_release,allow_initial,rollback))
+
+def run(dsnfile,activate=False,expected_base_release=None,allow_initial=False):
+ chunks=[json.loads(l) for l in (DATA/'chunks.jsonl').read_text().splitlines()]
+ manifest=load(DATA/'build-manifest.json');videos=load(DATA/'videos.json')
+ ids=load(DATA/'vector-ids.json');vectors=np.load(DATA/'vectors.npy');em=load(DATA/'embedding-manifest.json')
+ if (digest((DATA/'vectors.npy').read_bytes())!=em['vectors_sha256'] or
+     digest((DATA/'chunks.jsonl').read_bytes())!=manifest['chunks_sha256'] or
+     vectors.shape!=(len(chunks),DIM) or len(ids)!=len(set(ids)) or
+     ids!=[c['chunk_id'] for c in chunks] or not np.isfinite(vectors).all() or
+     np.any(np.linalg.norm(vectors,axis=1)==0) or
+     digest((DATA/'vector-ids.json').read_bytes())!=em['vector_ids_sha256'] or
+     em.get('model')!=MODEL or em.get('dimensions')!=DIM or
+     len(videos)!=manifest['videos'] or len(chunks)!=manifest['chunks'] or
+     len({v['video_id'] for v in videos})!=len(videos) or
+     {c['video_id'] for c in chunks}!={v['video_id'] for v in videos} or
+     any(c['release_id']!=manifest['release_id'] or digest(c['text'].encode())!=c['content_sha256'] for c in chunks)):
+  raise ValueError('artifact integrity mismatch')
+ if manifest.get('videos_sha256') and digest((DATA/'videos.json').read_bytes())!=manifest['videos_sha256']:
+  raise ValueError('video metadata hash mismatch')
+ with psycopg.connect(pathlib.Path(dsnfile).read_text().strip()) as db:
+  register_vector(db)
+  sealed=db.execute('SELECT rag.stage_release(%s,%s)',(Jsonb(manifest),Jsonb(videos))).fetchone()[0]
+  if not sealed:
+   for c,vec in zip(chunks,vectors):
+    db.execute('SELECT rag.put_chunk(%s,%s,%s)',(Jsonb(c),' '.join(terms(index_text(c))),vec))
+   db.execute('SELECT rag.seal_release(%s)',(manifest['release_id'],))
+  if activate:activate_release(db,manifest['release_id'],expected_base_release,allow_initial)
+ print(json.dumps(dict(imported=len(chunks),release_id=manifest['release_id'],activated=activate)))
+
 if __name__=='__main__':
- p=argparse.ArgumentParser();p.add_argument('--dsn-file',required=True);p.add_argument('--activate',action='store_true');args=p.parse_args();run(args.dsn_file,args.activate)
+ p=argparse.ArgumentParser();p.add_argument('--dsn-file',required=True);p.add_argument('--activate',action='store_true')
+ p.add_argument('--expected-base-release');p.add_argument('--allow-initial',action='store_true')
+ a=p.parse_args();run(a.dsn_file,a.activate,a.expected_base_release,a.allow_initial)

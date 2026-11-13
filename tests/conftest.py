@@ -10,7 +10,10 @@ socket.socket.connect_ex=deny
 socket.create_connection=deny
 socket.getaddrinfo=deny
 socket.socket.bind=deny
-subprocess.Popen=deny
+class DeniedPopen(subprocess.Popen):
+ # Preserve Popen[bytes] annotations in SDK imports without allowing execution.
+ def __init__(self,*args,**kwargs):deny()
+subprocess.Popen=DeniedPopen
 os.system=deny
 for name in dir(os):
  if name.startswith(('exec','spawn','posix_spawn')):setattr(os,name,deny)

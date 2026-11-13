@@ -19,6 +19,20 @@ jobs:
     name: test
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    services:
+      postgres:
+        # Keep the reusable CI invocation from Deploy unchanged.
+        image: ${{ (github.event_name == 'pull_request' || github.ref == 'refs/heads/dev') && 'pgvector/pgvector:pg17@sha256:7d0a41464797aeb9862dfdc0bbf1526b82cfd324cdd8036df19e3545f4a9ccb8' || '' }}
+        env:
+          POSTGRES_DB: totality_ci
+          POSTGRES_PASSWORD: ci-only-password
+        ports:
+          - 5432/tcp
+        options: >-
+          --health-cmd "pg_isready -h 127.0.0.1 -U postgres -d totality_ci"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 12
     steps:
       - uses: actions/checkout@v4
         with:
@@ -36,10 +50,16 @@ jobs:
           OPENBLAS_NUM_THREADS: "1"
           OMP_NUM_THREADS: "1"
         run: python -m pytest -q -p no:cacheprovider tests/test_synthetic.py
+      - name: PostgreSQL and pgvector integration tests
+        if: ${{ github.event_name == 'pull_request' || github.ref == 'refs/heads/dev' }}
+        env:
+          TOTALITY_CI_PG_PORT: ${{ job.services.postgres.ports[5432] }}
+          PYTHONPATH: tests
+        run: python -m unittest discover -s tests/integration -p postgres_release_checks.py -v
       - name: Probe script compiles
         run: python -m py_compile tools/probe.py
       - name: Compose file is valid
         run: |
           mkdir -p .secrets
-          for f in pg_password reader_password reader_dsn owner_dsn mcp_token; do : > ".secrets/$f"; done
+          for f in pg_password reader_password loader_password reader_dsn loader_dsn owner_dsn mcp_token; do : > ".secrets/$f"; done
           docker compose config --quiet
