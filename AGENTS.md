@@ -16,7 +16,9 @@ python3 tools/probe.py
 
 | 想知道 | 事實來源 |
 |---|---|
-| 服務有哪些工具、參數 | 對 MCP 呼叫 `tools/list`；實作在 `server.py`、`store.py` |
+| 服務有哪些 Tools、Prompts、Resources 與引用格式 | 跑 `python3 tools/probe.py` 或對 MCP 呼叫 `tools/list`、`prompts/list`、`resources/list`；實作在 `server.py`、`store.py` |
+| Cloudflare OAuth 2.1 閘道狀態與診斷標頭 | 跑 `python3 tools/probe.py`（`[Edge Gateway]` 段）；原始碼在 `$RAG_PROJECT_DOCS/rag/cf-gateway/src/gateway.ts`，由未追蹤的 `.probe.env` 指定 `RAG_PROJECT_DOCS`；公開端點以選填 `RAG_PUBLIC_GATEWAY` 指定 |
+| Oracle Host 容器狀態與部署雜湊 | 跑 `python3 tools/probe.py`（`[Oracle Host Snapshot]` 段，讀取宿主機每 5 分鐘輸出的 `.host-sot.json`） |
 | 資料表結構 | `schema.sql` |
 | 容器、網路、資源限制 | `compose.yaml` |
 | 依賴版本 | `requirements.lock`、`images.lock.json` |

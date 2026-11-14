@@ -2,16 +2,18 @@
 """Print the current state of this project from its sources of truth.
 
 Run this before starting work instead of trusting notes or memory. It only
-reads: git, the public GitHub API, and the MCP health tool. It never prints
-secrets. Standard library only.
+reads: git, the public GitHub API, the live MCP service, the Cloudflare Edge
+OAuth gateway, and the sanitized Oracle host SOT snapshot (.host-sot.json).
+It never prints secrets. Standard library only.
 
 Optional settings come from the environment or an untracked `.probe.env`
 file next to the repository root (KEY=VALUE lines):
   RAG_MCP_URL          default http://rag-mcp:8765/mcp
   RAG_MCP_TOKEN_FILE   default ~/.config/totality-rag/mcp_token
   RAG_PROJECT_DOCS     directory with decision/status notes (optional)
+  RAG_PUBLIC_GATEWAY   optional public gateway URL; unset skips edge HTTP checks
 """
-import json, os, pathlib, re, subprocess, sys, time, urllib.request
+import datetime, hashlib, json, os, pathlib, re, subprocess, sys, time, urllib.error, urllib.request
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 
@@ -19,25 +21,26 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 def load_env():
     f = ROOT / ".probe.env"
     if f.is_file():
-        for line in f.read_text().splitlines():
-            if "=" in line and not line.lstrip().startswith("#"):
+        for line in f.read_text(errors="replace").splitlines():
+            line = line.strip()
+            if line and not line.startswith("#") and "=" in line:
                 k, v = line.split("=", 1)
-                os.environ.setdefault(k.strip(), v.strip())
+                os.environ.setdefault(k.strip(), v.strip().strip("'\""))
+
+
+def section(title):
+    print(f"\n== {title}")
 
 
 def git(*args):
-    r = subprocess.run(["git", "-C", str(ROOT), *args], capture_output=True, text=True, timeout=30)
-    return r.returncode, (r.stdout or r.stderr).strip()
+    p = subprocess.run(["git", "-C", str(ROOT), *args], capture_output=True, text=True, timeout=15)
+    return p.returncode, (p.stdout or p.stderr).strip()
 
 
 def http_json(url, data=None, headers=None, timeout=10):
     req = urllib.request.Request(url, data=data, headers=headers or {})
     with urllib.request.urlopen(req, timeout=timeout) as r:
-        return json.loads(r.read().decode())
-
-
-def section(title):
-    print(f"\n== {title}")
+        return json.loads(r.read().decode("utf-8", errors="replace"))
 
 
 def probe_repo():
@@ -90,7 +93,7 @@ def probe_ci():
             print(f"latest deploy run: {state} at {r['head_sha'][:7]} ({r['created_at']}){note}")
         ok = next((r for r in runs if r["conclusion"] == "success"), None)
         print("in production:", f"{ok['head_sha'][:7]} (deployed {ok['updated_at']})" if ok else "no successful deploy found in the last 10 runs")
-    except Exception as e:  # network or rate limit
+    except Exception as e:
         print(f"GitHub API unavailable: {type(e).__name__}: {str(e)[:80]}")
 
 
@@ -114,9 +117,96 @@ def probe_service():
         keys = ("status", "release_id", "videos", "chunks", "backend", "read_only", "automatic_query_api")
         print("health:", ", ".join(f"{k}={h[k]}" for k in keys if k in h))
         print("tools:", ", ".join(t["name"] for t in call("tools/list")["tools"]))
+        prompts = [p["name"] for p in call("prompts/list").get("prompts", [])]
+        resources = [str(r["uri"]) for r in call("resources/list").get("resources", [])]
+        templates = [t["uriTemplate"] for t in call("resources/templates/list").get("resourceTemplates", [])]
+        if prompts:
+            print("prompts:", ", ".join(prompts))
+        if resources or templates:
+            print("resources:", ", ".join(resources + templates))
+        sample_res = call("tools/call", {"name": "search_transcripts", "arguments": {"query": "修行", "limit": 1}})
+        sample_data = sample_res.get("structuredContent") or json.loads(sample_res["content"][0]["text"])
+        if sample_data.get("results"):
+            r0 = sample_data["results"][0]
+            rich = [k for k in ("time_range_display", "verification_badge", "citation_markdown") if k in r0]
+            print("citation_fields:", ", ".join(rich) if rich else "legacy")
         print(f"endpoint: {url} (read-only; token in {token_file}, never print it)")
     except Exception as e:
         print(f"service unreachable at {url}: {type(e).__name__}: {str(e)[:80]}")
+
+
+def _probe_edge_http(base):
+    hdr = {"User-Agent": "totality-project-probe/1.0"}
+    try:
+        req = urllib.request.Request(f"{base}/healthz", headers=hdr)
+        with urllib.request.urlopen(req, timeout=8) as r:
+            body = json.loads(r.read().decode("utf-8", errors="replace"))
+            print(f"healthz: HTTP {r.status} status={body.get('status')} cache-control={r.headers.get('cache-control')}")
+        req_as = urllib.request.Request(f"{base}/.well-known/oauth-authorization-server", headers=hdr)
+        with urllib.request.urlopen(req_as, timeout=8) as r:
+            as_meta = json.loads(r.read().decode("utf-8", errors="replace"))
+            print(f"oauth_metadata: issuer={as_meta.get('issuer')} pkce={as_meta.get('code_challenge_methods_supported')} cache-control={r.headers.get('cache-control')}")
+        try:
+            urllib.request.urlopen(urllib.request.Request(f"{base}/authorize", headers=hdr), timeout=8)
+        except urllib.error.HTTPError as err:
+            diag = err.headers.get("x-auth-diag", "none")
+            print(f"diagnostic_telemetry: active (GET /authorize without params -> HTTP {err.code}, x-auth-diag={diag})")
+    except Exception as e:
+        print(f"edge gateway check failed at {base}: {type(e).__name__}: {str(e)[:80]}")
+
+
+def probe_edge_gateway():
+    section("edge gateway (Cloudflare OAuth 2.1 gateway is the source of truth)")
+    base = os.environ.get("RAG_PUBLIC_GATEWAY", "").strip().rstrip("/")
+    if base:
+        _probe_edge_http(base)
+    else:
+        print("edge HTTP checks skipped: RAG_PUBLIC_GATEWAY is not configured")
+
+    docs = os.environ.get("RAG_PROJECT_DOCS")
+    if docs:
+        gw_src = pathlib.Path(docs) / "rag/cf-gateway/src/gateway.ts"
+        if gw_src.is_file():
+            code = gw_src.read_text(errors="replace")
+            features = []
+            if "isConsentRemembered" in code:
+                features.append("remembered_consent_fastpath")
+            if "X-Auth-Diag" in code:
+                features.append("structured_redacted_diagnostics")
+            if "style-src 'unsafe-inline'" in code and "googleOrigin" in code:
+                features.append("modern_ui_and_csp_redirect_fix")
+            print("gateway_source_features:", ", ".join(features))
+
+
+def probe_host_sot():
+    docs = os.environ.get("RAG_PROJECT_DOCS")
+    if not docs:
+        return
+    sot_file = pathlib.Path(docs) / ".host-sot.json"
+    if not sot_file.is_file():
+        return
+    section("oracle host snapshot (.host-sot.json exported by host cron)")
+    try:
+        data = json.loads(sot_file.read_text(errors="replace"))
+        updated = datetime.datetime.fromisoformat(data["updated_at"].replace("Z", "+00:00"))
+        age_min = (datetime.datetime.now(datetime.timezone.utc) - updated).total_seconds() / 60
+        stale = age_min > data.get("stale_after_minutes", 15)
+        print(f"updated_at: {data['updated_at']} (age={age_min:.1f}m -> {'STALE' if stale else 'FRESH'})")
+        for cname, cinfo in sorted(data.get("containers", {}).items()):
+            print(f"container {cname}: {cinfo.get('status')} ({cinfo.get('image')})")
+        host_shas = data.get("files_sha256", {})
+        mismatches = []
+        for fname, h_sha in sorted(host_shas.items()):
+            local_p = ROOT / fname
+            if local_p.is_file():
+                l_sha = hashlib.sha256(local_p.read_bytes()).hexdigest()
+                if l_sha != h_sha:
+                    mismatches.append(fname)
+        print("host_vs_repo_files:", "IN_SYNC (all tracked files match)" if not mismatches else f"DIFF in {', '.join(mismatches)}")
+        if data.get("latest_backup"):
+            print(f"latest_db_backup: {data['latest_backup']} (total={data.get('backup_count', 0)})")
+    except Exception as e:
+        print(f"host snapshot unreadable: {type(e).__name__}: {str(e)[:80]}")
 
 
 def probe_docs():
@@ -139,7 +229,7 @@ def probe_docs():
 def main():
     load_env()
     print("project probe:", time.strftime("%Y-%m-%d %H:%M %Z"))
-    for step in (probe_repo, probe_ci, probe_service, probe_docs):
+    for step in (probe_repo, probe_ci, probe_service, probe_edge_gateway, probe_host_sot, probe_docs):
         try:
             step()
         except Exception as e:

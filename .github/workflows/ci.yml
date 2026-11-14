@@ -49,13 +49,13 @@ jobs:
           PYTHONDONTWRITEBYTECODE: "1"
           OPENBLAS_NUM_THREADS: "1"
           OMP_NUM_THREADS: "1"
-        run: python -m pytest -q -p no:cacheprovider tests/test_synthetic.py
+        run: python -m pytest -q -p no:cacheprovider tests/test_synthetic.py tests/test_store_reconnect.py
       - name: PostgreSQL and pgvector integration tests
         if: ${{ github.event_name == 'pull_request' || github.ref == 'refs/heads/dev' }}
         env:
           TOTALITY_CI_PG_PORT: ${{ job.services.postgres.ports[5432] }}
           PYTHONPATH: tests
-        run: python -m unittest discover -s tests/integration -p postgres_release_checks.py -v
+        run: python -m unittest discover -s tests/integration -p 'postgres_*_checks.py' -v
       - name: Probe script compiles
         run: python -m py_compile tools/probe.py
       - name: Compose file is valid

@@ -1,5 +1,5 @@
 """CPU-light regression tests using only invented numbered test sentences."""
-import json,pathlib,sqlite3,sys
+import json,pathlib,sqlite3,sys,threading
 import numpy as np,pytest
 import common,build,store,query_embed,server
 from synthetic import make_source,add_vectors,CharacterTokenizer
@@ -139,7 +139,7 @@ def test_release_activation_format(sample):
 class FakePG:
  """In-memory SQL boundary double; never connects or contains real sources."""
  def __init__(self,release,manifest,videos,chunks):
-  self.active=(release,manifest,videos);self.chunks=chunks;self.result=[];self.reads=0
+  self.closed=False;self.active=(release,manifest,videos);self.chunks=chunks;self.result=[];self.reads=0
  def execute(self,sql,args=()):
   if 'JOIN rag.releases' in sql:
    self.result=[self.active] if self.active else [];self.reads+=1
@@ -150,6 +150,7 @@ class FakePG:
   else:raise AssertionError('unexpected synthetic SQL')
   return self
  def fetchone(self):return self.result[0] if self.result else None
+ def fetchall(self):return list(self.result)
  def __iter__(self):return iter(self.result)
 
 def test_pg_metadata_switch_rollback_and_filtered_search(sample,monkeypatch):
@@ -158,7 +159,7 @@ def test_pg_metadata_switch_rollback_and_filtered_search(sample,monkeypatch):
  a=dict(chunks[0],release_id=old);b=dict(chunks[2],release_id=new)
  videos=[dict(video_id=a['video_id']),dict(video_id=b['video_id'])]
  s=object.__new__(store.Store);s.backend='postgres';s.videos={};s.release=None;s.index_vectors=None
- s.db=FakePG(old,dict(videos=1,chunks=1),videos[:1],[a,b]);s.refresh()
+ s._lock=threading.RLock();s.db=FakePG(old,dict(videos=1,chunks=1),videos[:1],[a,b]);s.refresh()
  assert list(s.videos)==[a['video_id']]
  assert s.search(b['text'],video_id=b['video_id'])['status']=='unknown_video'
  s.db.active=(new,dict(videos=2,chunks=1),videos)
@@ -183,7 +184,7 @@ def test_search_pins_once_even_if_pointer_changes(sample):
    result=super().execute(sql,args)
    if 'JOIN rag.releases' in sql:self.active=(new,dict(videos=0,chunks=0),[])
    return result
- s.db=SwitchingPG(old,dict(videos=1,chunks=1),[dict(video_id=c['video_id'])],[c])
+ s._lock=threading.RLock();s.db=SwitchingPG(old,dict(videos=1,chunks=1),[dict(video_id=c['video_id'])],[c])
  result=s.search(c['text'],video_id=c['video_id'])
  assert result['release_id']==old and result['results'][0]['chunk_id']==c['chunk_id']
  assert s.db.reads==1
@@ -193,7 +194,7 @@ def test_server_pg_list_health_follow_same_metadata(sample,monkeypatch):
  old='r1-'+'1'*20;new='r1-'+'2'*20
  videos=[dict(video_id=c['video_id']) for c in [chunks[0],chunks[2]]]
  s=object.__new__(store.Store);s.backend='postgres';s.release=None;s.videos={};s.manifest={}
- s.db=FakePG(old,dict(videos=1,chunks=1),videos[:1],[])
+ s._lock=threading.RLock();s.db=FakePG(old,dict(videos=1,chunks=1),videos[:1],[])
  monkeypatch.setattr(server,'_store',s)
  assert server.health()['videos']==1 and server.list_videos()['release_id']==old
  s.db.active=(new,dict(videos=2,chunks=2),videos)
@@ -262,3 +263,95 @@ def test_server_list_and_health_refresh(sample,monkeypatch):
   for offset in [-1,1000001]:
    with pytest.raises(ValueError):server.list_videos(offset=offset)
  finally:s.db.close()
+
+def test_rich_citations_resources_and_prompts(sample,monkeypatch):
+ import server
+ _,_,chunks=sample;s=store.Store();monkeypatch.setattr(server,'_store',s)
+ try:
+  res=server.search_transcripts('synthetic001',2)
+  first=res['results'][0]
+  assert 'citation_markdown' in first and 'verification_badge' in first and 'time_range_display' in first
+  assert first['listen_url'] in first['citation_markdown']
+  p=server.get_passage(chunks[0]['chunk_id'])['passage']
+  assert p['citation_markdown']==first['citation_markdown']
+  summary=json.loads(server.catalog_summary())
+  assert summary['total_videos']==2 and summary['total_chunks']==4
+  videos=json.loads(server.catalog_videos())
+  assert videos['total']==2 and len(videos['videos'])==2
+  outline=json.loads(server.video_outline(chunks[0]['video_id']))
+  assert outline['status']=='ok' and outline['passage_count']==2
+  assert json.loads(server.video_outline('FAKEUNKNOWN'))['status']=='unknown_video'
+  with pytest.raises(ValueError):server.video_outline('bad!')
+  assert 'search_transcripts' in server.explore_concept('測試')
+  assert 'get_passage' in server.verify_quote('測試',chunks[0]['video_id'])
+  assert 'totality://videos/' in server.video_study_guide(chunks[0]['video_id'])
+ finally:s.db.close()
+
+def test_citation_badges_ranges_and_source_fields(sample):
+ _,_,chunks=sample;s=store.Store()
+ try:
+  for flags,pending,expected in [
+   (['outside_source_chunk'],[], '機器辨識（時間軸邊界回退）'),
+   (['beyond_video_duration'],[], '機器辨識（時間軸邊界回退）'),
+   (['not_audio_verified'],[{'alternatives':['synthetic']}], '機器辨識+上下文校訂（含待判候選詞）'),
+   (['not_audio_verified'],[], '機器辨識+上下文校訂（未人工聽音）'),
+   ([],[], '已校訂'),
+  ]:
+   c=dict(chunks[0],start=3661,end=3670,quality_flags=flags,pending=pending)
+   full=s.public(c);short=s.public(c,full=False)
+   assert full['verification_badge']==expected
+   assert full['time_range_display']=='1:01:01–1:01:10'
+   assert full['citation_markdown']==f"[{c['title']} (1:01:01–1:01:10)]({c['listen_url']}) · `{expected}`"
+   assert full['quality_flags']==flags and full['pending']==pending
+   assert full['source_refs']==c['source_refs'] and 'source_refs' not in short
+   assert full['citation_markdown']==short['citation_markdown']
+  assert store._fmt_mmss(-1)=='00:00'
+ finally:s.db.close()
+
+def test_sdk_registers_resources_and_prompts_without_network():
+ import asyncio
+ prompts=asyncio.run(server.mcp.list_prompts())
+ resources=asyncio.run(server.mcp.list_resources())
+ templates=asyncio.run(server.mcp.list_resource_templates())
+ assert {p.name for p in prompts}=={'explore_concept','verify_quote','video_study_guide'}
+ assert {str(r.uri) for r in resources}=={'totality://catalog/summary','totality://catalog/videos'}
+ assert {t.uriTemplate for t in templates}=={'totality://videos/{video_id}'}
+
+def test_probe_unconfigured_gateway_skips_http_but_checks_source(tmp_path,monkeypatch,capsys):
+ from tools import probe
+ monkeypatch.delenv('RAG_PUBLIC_GATEWAY',raising=False)
+ monkeypatch.setenv('RAG_PROJECT_DOCS',str(tmp_path))
+ source=tmp_path/'rag/cf-gateway/src/gateway.ts';source.parent.mkdir(parents=True)
+ source.write_text("isConsentRemembered X-Auth-Diag style-src 'unsafe-inline' googleOrigin")
+ def deny(*args,**kwargs):raise AssertionError('unset gateway must not make HTTP requests')
+ monkeypatch.setattr(probe.urllib.request,'urlopen',deny)
+ probe.probe_edge_gateway()
+ output=capsys.readouterr().out
+ assert 'skipped: RAG_PUBLIC_GATEWAY is not configured' in output
+ assert 'remembered_consent_fastpath' in output and 'structured_redacted_diagnostics' in output
+
+def test_probe_configured_gateway_is_used(monkeypatch,capsys):
+ from tools import probe
+ from io import BytesIO
+ from urllib.error import HTTPError
+ monkeypatch.setenv('RAG_PUBLIC_GATEWAY','https://gateway.example.invalid/')
+ monkeypatch.delenv('RAG_PROJECT_DOCS',raising=False)
+ seen=[]
+ class Reply(BytesIO):
+  status=200
+  headers={'cache-control':'no-store'}
+ def respond(request,**kwargs):
+  seen.append(request.full_url)
+  if request.full_url.endswith('/authorize'):
+   raise HTTPError(request.full_url,400,'synthetic',{'x-auth-diag':'synthetic'},None)
+  return Reply(json.dumps({'status':'ok','issuer':'https://gateway.example.invalid','code_challenge_methods_supported':['S256']}).encode())
+ monkeypatch.setattr(probe.urllib.request,'urlopen',respond)
+ probe.probe_edge_gateway()
+ assert seen==['https://gateway.example.invalid/healthz','https://gateway.example.invalid/.well-known/oauth-authorization-server','https://gateway.example.invalid/authorize']
+ assert 'x-auth-diag=synthetic' in capsys.readouterr().out
+
+def test_probe_git_preserves_stderr_on_failure(monkeypatch):
+ from tools import probe
+ from types import SimpleNamespace
+ monkeypatch.setattr(probe.subprocess,'run',lambda *args,**kwargs:SimpleNamespace(returncode=1,stdout='',stderr='synthetic failure'))
+ assert probe.git('status')==(1,'synthetic failure')
