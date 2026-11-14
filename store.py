@@ -9,6 +9,21 @@ def serialized(method):
   with self._lock:return method(self,*args,**kwargs)
  return locked
 
+def _fmt_mmss(sec):
+ s=max(0,int(round(float(sec or 0))))
+ m,s=divmod(s,60);h,m=divmod(m,60)
+ return f'{h}:{m:02d}:{s:02d}' if h else f'{m:02d}:{s:02d}'
+
+def _badge(c):
+ flags=set(c.get('quality_flags') or ())
+ if 'outside_source_chunk' in flags or 'beyond_video_duration' in flags:
+  return '機器辨識（時間軸邊界回退）'
+ if c.get('pending'):
+  return '機器辨識+上下文校訂（含待判候選詞）'
+ if 'not_audio_verified' in flags:
+  return '機器辨識+上下文校訂（未人工聽音）'
+ return '已校訂'
+
 class Store:
  def __init__(self):
   self._lock=threading.RLock()
@@ -130,5 +145,8 @@ class Store:
  def public(self,c,full=True):
   keys=['chunk_id','video_id','release_id','title','text','start','end','time_status','citation_start','citation_precision','source_url','listen_url','quality_flags','quality_flag_evidence','pending','pending_relations','content_sha256','untrusted_source']
   out={k:c[k] for k in keys}
+  span=f"{_fmt_mmss(c['start'])}–{_fmt_mmss(c['end'])}"
+  badge=_badge(c)
+  out.update(time_range_display=span,verification_badge=badge,citation_markdown=f"[{c['title']} ({span})]({c['listen_url']}) · `{badge}`")
   if full:out.update(source_refs=c['source_refs'],source_units=c['source_units'])
   return out
