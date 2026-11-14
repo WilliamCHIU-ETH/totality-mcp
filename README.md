@@ -9,6 +9,7 @@
 ## 架構與安全預設
 
 - MCP 與 PostgreSQL + pgvector 是分開的服務。DB 不公開埠，MCP 使用僅有 SELECT 的 reader 角色；loader 僅能透過受限函式建立／封存候選及 CAS 切版，不取得 owner DSN、DDL 或刪除權限。
+- PostgreSQL 唯讀查詢偵測已關閉連線或連線中斷時，最多重連重試一次；每次重新讀取 DSN 檔、註冊 vector 並重驗非特權／無寫入與發布權限，維持 autocommit、唯讀交易及 3 秒 statement timeout（連線 timeout 5 秒）。不重試 SQL timeout／一般查詢錯誤，不重播外部 embedding 請求，不退用本地舊資料；持續斷線或權限錯誤仍向呼叫端報錯。Store 內部序列鎖保護重連與單次檢索版本。
 - SQLite + NumPy 為離線工程測試 backend。stdio 繼承本地啟動者權限，不提供多人隔離。
 - HTTP 必須提供至少 32 bytes 的 Bearer token，預設 host 綁 `127.0.0.1`。Compose 容器內的監聽不同於 host publication：host 只發佈 `127.0.0.1:8765`。
 - Host 必須符合 allowlist；如有 Origin 也須符合 allowlist。不因公開程式碼而開放服務埠或取消認證。
@@ -77,10 +78,18 @@ sh deploy/restore_verify.sh /path/to/backup.dump
 ## 離線合成測試
 
 ```bash
-PYTHONDONTWRITEBYTECODE=1 OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 .venv/bin/python -m pytest -q -p no:cacheprovider tests/test_synthetic.py
+PYTHONDONTWRITEBYTECODE=1 OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 .venv/bin/python -m pytest -q -p no:cacheprovider tests/test_synthetic.py tests/test_store_reconnect.py
 ```
 
 規模為 2 部假影片、4 列「測試句」、最多 4 個 1536 維人造單位向量；不呼叫 API、不啟動 Docker、不開 HTTP listener。測試守衛拒絕 socket 連線、DNS 解析與子程序。建置測試注入字元 tokenizer 替身，沒有驗證真實 tokenizer；向量亦非模型生成。真實語料品質、MCP SDK 握手及 PostgreSQL 整合需在另行配置的環境驗證；私人驗收資料見 `qa/README.md`。
+
+PostgreSQL 整合測試由 CI 在拋棄式 PostgreSQL + pgvector 服務執行：
+
+```bash
+PYTHONPATH=.:tests python -m unittest discover -s tests/integration -p 'postgres_*_checks.py' -v
+```
+
+重連測試另外建立並清除獨立測試 database／角色，以合成資料驗證 backend 強制中斷、唯讀設定、vector 及權限重驗。私人隔離庫可用 `TOTALITY_TEST_OWNER_DSN_FILE` 指定 owner 憑證檔；只允許測試專用實例，須有建庫／建角色／中止測試 backend 權限，勿對正式庫執行。測試不輸出憑證，不重建既有 schema 或修改既有角色。
 
 ## 版本與狀態
 

@@ -1,5 +1,5 @@
 """CPU-light regression tests using only invented numbered test sentences."""
-import json,pathlib,sqlite3,sys
+import json,pathlib,sqlite3,sys,threading
 import numpy as np,pytest
 import common,build,store,query_embed,server
 from synthetic import make_source,add_vectors,CharacterTokenizer
@@ -139,7 +139,7 @@ def test_release_activation_format(sample):
 class FakePG:
  """In-memory SQL boundary double; never connects or contains real sources."""
  def __init__(self,release,manifest,videos,chunks):
-  self.active=(release,manifest,videos);self.chunks=chunks;self.result=[];self.reads=0
+  self.closed=False;self.active=(release,manifest,videos);self.chunks=chunks;self.result=[];self.reads=0
  def execute(self,sql,args=()):
   if 'JOIN rag.releases' in sql:
    self.result=[self.active] if self.active else [];self.reads+=1
@@ -150,6 +150,7 @@ class FakePG:
   else:raise AssertionError('unexpected synthetic SQL')
   return self
  def fetchone(self):return self.result[0] if self.result else None
+ def fetchall(self):return list(self.result)
  def __iter__(self):return iter(self.result)
 
 def test_pg_metadata_switch_rollback_and_filtered_search(sample,monkeypatch):
@@ -158,7 +159,7 @@ def test_pg_metadata_switch_rollback_and_filtered_search(sample,monkeypatch):
  a=dict(chunks[0],release_id=old);b=dict(chunks[2],release_id=new)
  videos=[dict(video_id=a['video_id']),dict(video_id=b['video_id'])]
  s=object.__new__(store.Store);s.backend='postgres';s.videos={};s.release=None;s.index_vectors=None
- s.db=FakePG(old,dict(videos=1,chunks=1),videos[:1],[a,b]);s.refresh()
+ s._lock=threading.RLock();s.db=FakePG(old,dict(videos=1,chunks=1),videos[:1],[a,b]);s.refresh()
  assert list(s.videos)==[a['video_id']]
  assert s.search(b['text'],video_id=b['video_id'])['status']=='unknown_video'
  s.db.active=(new,dict(videos=2,chunks=1),videos)
@@ -183,7 +184,7 @@ def test_search_pins_once_even_if_pointer_changes(sample):
    result=super().execute(sql,args)
    if 'JOIN rag.releases' in sql:self.active=(new,dict(videos=0,chunks=0),[])
    return result
- s.db=SwitchingPG(old,dict(videos=1,chunks=1),[dict(video_id=c['video_id'])],[c])
+ s._lock=threading.RLock();s.db=SwitchingPG(old,dict(videos=1,chunks=1),[dict(video_id=c['video_id'])],[c])
  result=s.search(c['text'],video_id=c['video_id'])
  assert result['release_id']==old and result['results'][0]['chunk_id']==c['chunk_id']
  assert s.db.reads==1
@@ -193,7 +194,7 @@ def test_server_pg_list_health_follow_same_metadata(sample,monkeypatch):
  old='r1-'+'1'*20;new='r1-'+'2'*20
  videos=[dict(video_id=c['video_id']) for c in [chunks[0],chunks[2]]]
  s=object.__new__(store.Store);s.backend='postgres';s.release=None;s.videos={};s.manifest={}
- s.db=FakePG(old,dict(videos=1,chunks=1),videos[:1],[])
+ s._lock=threading.RLock();s.db=FakePG(old,dict(videos=1,chunks=1),videos[:1],[])
  monkeypatch.setattr(server,'_store',s)
  assert server.health()['videos']==1 and server.list_videos()['release_id']==old
  s.db.active=(new,dict(videos=2,chunks=2),videos)
