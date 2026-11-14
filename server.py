@@ -75,8 +75,8 @@ def video_outline(video_id:str)->str:
 
 @mcp.prompt()
 def explore_concept(concept:str)->str:
- """依主題跨影片深度探索楊定一文字庫，自動檢索並附時間軸回聽連結與校訂狀態。"""
- return f"""請針對主題「{concept}」查詢楊定一文字庫（Totality RAG）：
+ """依主題跨影片深度探索逐字稿文字庫，自動檢索並附時間軸回聽連結與校訂狀態。"""
+ return f"""請針對主題「{concept}」查詢逐字稿文字庫（Totality RAG）：
 1. 先呼叫 `search_transcripts(query="{concept}", limit=5)` 取得候選段落。
 2. 對相關度最高的段落呼叫 `get_passage(chunk_id=...)` 檢視完整上下文、原始 ASR 對照（`source_refs`）與待判候選詞（`pending`）。
 3. 回答時請嚴格區分「字面原文支持」與「跨段落整理」，每一個論點都必須直接附上回傳的 `citation_markdown`（含可點擊直達秒數的 YouTube 回聽連結與 `verification_badge` 校訂狀態徽章）。若文字庫無明確依據，請明確說明缺口，不自行延伸推論。"""
@@ -85,7 +85,7 @@ def explore_concept(concept:str)->str:
 def verify_quote(statement:str,video_id:str='')->str:
  """查證特定語句或概念的原話出處、前後文與校訂／待判旗標。"""
  scope=f'（限定 video_id="{video_id}"）' if video_id else ''
- return f"""請在楊定一文字庫中查證以下語句或說法{scope}：「{statement}」
+ return f"""請在逐字稿文字庫中查證以下語句或說法{scope}：「{statement}」
 1. 呼叫 `search_transcripts` 尋找字面或近義段落，檢查 `match_type` 與 `matched_fields`。
 2. 呼叫 `get_passage` 核對 `text`（上下文校訂稿）、`source_refs`（原始機器辨識列）與 `pending`（待判替代詞）。
 3. 輸出查證報告：(a) 原文逐字引述、(b) `citation_markdown` 回聽連結與時間範圍、(c) `verification_badge` 與任何品質警示旗標（`quality_flags`）。"""
