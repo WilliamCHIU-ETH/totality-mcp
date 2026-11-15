@@ -3,7 +3,7 @@ Enable only when query-text external processing is explicitly acceptable.
 A distinct writable query ledger plus immutable corpus reservations enforces a
 combined $1 local-program ceiling; never logs query text or full responses.
 """
-import fcntl,math,os,pathlib,sqlite3,time
+import fcntl,os,pathlib,sqlite3,time
 import httpx,numpy as np
 from common import *
 PRICE=0.02/1_000_000

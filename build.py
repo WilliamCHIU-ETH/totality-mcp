@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Deterministic rebuild from read-only stage-one inputs; no API calls."""
 import argparse,collections,json,os,pathlib,re,sqlite3
+from typing import Any
 from common import *
 os.environ.setdefault('TIKTOKEN_CACHE_DIR',str(BASE/'.cache/tiktoken'))
 ENC=None
@@ -12,7 +13,6 @@ def nt(s):
  return len(ENC.encode(s,disallowed_special=()))
 def split_text(text,max_tokens=340):
  # Unicode-safe offsets, preferring sentence/clause boundaries. No model rewriting.
- start=0
  for m in re.finditer(r'.+?(?:[。！？!?；;\n]|$)',text,re.S):
   a,b=m.span()
   while a<b:
@@ -82,15 +82,15 @@ def build(source=SOURCE, *, base_release=None):
  # A candidate's base is immutable. A rebuild against a new base needs a new ID.
  release_identity=frozen if base_release is None else dict(sources=frozen,base_release=base_release)
  release='r1-'+digest(canonical(release_identity).encode())[:20]
- output=[];coverage=collections.Counter()
+ output:list[dict[str,Any]]=[];coverage=collections.Counter()
  for v in videos:
-  vid=v['video_id'];rel,rows=allrows[vid];units=[]
+  vid=v['video_id'];rel,rows=allrows[vid];units:list[dict[str,Any]]=[]
   for index,row in enumerate(rows):
    text=row['reader_text']
    for a,b,textpart in split_text(text):units.append(dict(row_index=index,char_start=a,char_end=b,text=textpart,source_chunk=row['chunk_id']))
   pos=0
   while pos<len(units):
-   end=pos;parts=[]
+   end=pos;parts:list[str]=[]
    while end<len(units) and units[end]['source_chunk']==units[pos]['source_chunk']:
     candidate='\n'.join(parts+[units[end]['text']])
     if parts and nt(candidate)>350:break
@@ -130,7 +130,7 @@ def build(source=SOURCE, *, base_release=None):
    output.append(dict(chunk_id=cid,video_id=vid,release_id=release,title=v['title'],duration_s=v['duration_s'],text=text,content_sha256=digest(text.encode()),embedding_model=MODEL,embedding_dimensions=DIM,normalization_version=normalization['policy'],chunker_version=VERSION,token_count=nt(text),source_units=chosen,source_refs=refs,start=min(r['start'] for r in selected),end=max(r['end'] for r in selected),time_status=sorted(set(r['timing_status'] for r in selected)),citation_start=safe_start,citation_precision='source_chunk_start_only' if uncertain and safe_start is not None else ('source_segment_estimate' if safe_start is not None else 'unavailable'),source_url=v['url'],listen_url=v['url']+(f'&t={int(safe_start)}s' if safe_start is not None else ''),quality_flags=sorted(flags),quality_flag_evidence=quality_evidence,pending=cards,pending_relations=pending_relations,untrusted_source=True))
    if end==len(units) or units[end]['source_chunk']!=units[pos]['source_chunk']:pos=end
    else:
-    overlap=end;tail=[]
+    overlap=end;tail:list[str]=[]
     while overlap>pos+1 and nt('\n'.join([units[overlap-1]['text']]+tail))<=50:
      overlap-=1;tail.insert(0,units[overlap]['text'])
     pos=overlap
@@ -141,9 +141,10 @@ def build(source=SOURCE, *, base_release=None):
   for c in output:f.write(canonical(c)+'\n')
  write_json(DATA/'videos.json',videos);write_json(DATA/'sources.json',dict(release_id=release,sha256=frozen,stage_one_hashes_verified=verified))
  unique={c['content_sha256']:c for c in output};tokens=sum(c['token_count'] for c in unique.values())
- report=dict(release_id=release,videos=len(videos),chunks=len(output),unique_embedding_texts=len(unique),source_counts=dict(rowcounts),pending_cards=len(pending),pending_cards_mapped=len(pending_seen),corrected_source_records=len(corrections),source_files=len(frozen),quality_flag_files=quality_files,source_quality_item_flag_counts=dict(quality_counts),stage_one_hashes_verified=verified,chunk_tokens=sum(c['token_count'] for c in output),uncached_tokens=tokens,estimated_usd=tokens*0.02/1e6,retry_reserved_usd=tokens*0.02/1e6*3,budget_usd=1,model=MODEL,dimensions=DIM,chunks_sha256=digest((DATA/'chunks.jsonl').read_bytes()),flag_chunk_counts=dict(collections.Counter(f for c in output for f in c['quality_flags'])),max_chunk_tokens=max(c['token_count'] for c in output),notes=['350 token ceiling; sentence/row-boundary overlap up to 50 tokens, may be zero for long units','Source text is not audio verified; estimated time is not precise alignment'])
+ estimated_usd=tokens*0.02/1e6;retry_reserved_usd=estimated_usd*3
+ report:dict[str,Any]=dict(release_id=release,videos=len(videos),chunks=len(output),unique_embedding_texts=len(unique),source_counts=dict(rowcounts),pending_cards=len(pending),pending_cards_mapped=len(pending_seen),corrected_source_records=len(corrections),source_files=len(frozen),quality_flag_files=quality_files,source_quality_item_flag_counts=dict(quality_counts),stage_one_hashes_verified=verified,chunk_tokens=sum(c['token_count'] for c in output),uncached_tokens=tokens,estimated_usd=estimated_usd,retry_reserved_usd=retry_reserved_usd,budget_usd=1,model=MODEL,dimensions=DIM,chunks_sha256=digest((DATA/'chunks.jsonl').read_bytes()),flag_chunk_counts=dict(collections.Counter(f for c in output for f in c['quality_flags'])),max_chunk_tokens=max(c['token_count'] for c in output),notes=['350 token ceiling; sentence/row-boundary overlap up to 50 tokens, may be zero for long units','Source text is not audio verified; estimated time is not precise alignment'])
  if base_release is not None:report['base_release']=base_release
- if report['retry_reserved_usd']>1:raise ValueError('dry-run exceeds budget')
+ if retry_reserved_usd>1:raise ValueError('dry-run exceeds budget')
  write_json(DATA/'build-manifest.json',report)
  # SQLite is an explicitly local test backend, not the production DB.
  path=DATA/'local.sqlite'

@@ -69,19 +69,21 @@ sh deploy/restore_verify.sh /path/to/backup.dump
 
 ## 分支與自動部署
 
-- `dev` 是開發分支，`main` 是正式環境。日常變更推到 `dev`，CI 會跑離線合成測試。
+- `dev` 是開發分支，`main` 是正式環境。日常變更推到 `dev`，CI 會執行靜態檢查（`ruff`、`ty`）與離線合成／邊界測試。
 - 要上線時開 `dev` → `main` 的 PR；`main` 受保護，只接受測試通過的 PR。
 - 合併到 `main` 後 Deploy workflow 會重跑測試，並等待 repo 擁有者在 `production` 環境核准，核准後才連到主機。
 - 主機端的部署金鑰綁定單一強制指令：只接受一個已在 `main` 上的 commit SHA，只重建並重啟 MCP 服務，健康檢查失敗即退回上一版。
 - 自動部署只更新應用程式檔（`Dockerfile`、`requirements.lock`、`*.py`）。`compose.yaml`、`schema.sql`、`deploy/`、資料、憑證與資料庫都不會被自動變更，需由操作者審查後手動處理。
 
-## 離線合成測試
+## 靜態檢查與離線合成測試
 
 ```bash
-PYTHONDONTWRITEBYTECODE=1 OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 .venv/bin/python -m pytest -q -p no:cacheprovider tests/test_synthetic.py tests/test_store_reconnect.py
+ruff check .
+ty check --python .venv/bin/python .
+PYTHONDONTWRITEBYTECODE=1 OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 .venv/bin/python -m pytest -q -p no:cacheprovider tests/
 ```
 
-規模為 2 部假影片、4 列「測試句」、最多 4 個 1536 維人造單位向量；不呼叫 API、不啟動 Docker、不開 HTTP listener。測試守衛拒絕 socket 連線、DNS 解析與子程序。建置測試注入字元 tokenizer 替身，沒有驗證真實 tokenizer；向量亦非模型生成。真實語料品質、MCP SDK 握手及 PostgreSQL 整合需在另行配置的環境驗證；私人驗收資料見 `qa/README.md`。
+規模為 2 部假影片、4 列「測試句」、最多 4 個 1536 維人造單位向量，並包含靜態邊界／去識別／安全守衛掃描；不呼叫 API、不啟動 Docker、不開 HTTP listener。測試守衛拒絕 socket 連線、DNS 解析與子程序。建置測試注入字元 tokenizer 替身，沒有驗證真實 tokenizer；向量亦非模型生成。真實語料品質、MCP SDK 握手及 PostgreSQL 整合需在另行配置的環境驗證；私人驗收資料見 `qa/README.md`。
 
 PostgreSQL 整合測試由 CI 在拋棄式 PostgreSQL + pgvector 服務執行：
 

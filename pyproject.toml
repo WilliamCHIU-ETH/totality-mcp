@@ -1,0 +1,41 @@
+[project]
+name = "totality-mcp"
+version = "0.1.0"
+requires-python = ">=3.12"
+
+[tool.ruff]
+target-version = "py312"
+line-length = 120
+
+[tool.ruff.lint]
+select = [
+    "E4",
+    "E9",
+    "F",
+    "B",
+    "UP017",
+    "PLW1510",
+    "RUF012",
+    "RUF059",
+    "S102",
+    "S105",
+    "S107",
+    "S110",
+    "S112",
+    "S307",
+    "S501",
+    "S506",
+    "S602",
+    "S608",
+]
+ignore = ["E401", "F403", "F405"]
+
+[tool.ty.environment]
+python-version = "3.12"
+
+[tool.ty.src]
+exclude = [
+    "tests/conftest.py",
+    "tests/test_synthetic.py",
+    "tests/test_store_reconnect.py",
+]

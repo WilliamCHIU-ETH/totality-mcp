@@ -48,7 +48,7 @@ def add_vectors(data):
  np.save(data/'vectors.npy',vectors);write(data/'vector-ids.json',[c['chunk_id'] for c in chunks])
  db=sqlite3.connect(data/'embedding-cache.sqlite')
  db.execute('CREATE TABLE cache(hash TEXT,model TEXT,dim INT,vec BLOB,PRIMARY KEY(hash,model,dim))')
- for c,v in zip(chunks,vectors):db.execute('INSERT INTO cache VALUES(?,?,?,?)',(c['content_sha256'],MODEL,DIM,v.tobytes()))
+ for c,v in zip(chunks,vectors,strict=True):db.execute('INSERT INTO cache VALUES(?,?,?,?)',(c['content_sha256'],MODEL,DIM,v.tobytes()))
  db.commit();db.close()
  write(data/'embedding-manifest.json',dict(synthetic_fixture=True,conservative_reserved_usd=0,model=MODEL,dimensions=DIM,vectors_sha256=digest((data/'vectors.npy').read_bytes()),vector_ids_sha256=digest((data/'vector-ids.json').read_bytes())))
  return chunks

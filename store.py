@@ -51,8 +51,8 @@ class Store:
    register_vector(db)
    row=db.execute('SELECT rolsuper,rolcreaterole,rolcreatedb,rolreplication,rolbypassrls FROM pg_roles WHERE rolname=current_user').fetchone()
    if not row or any(row):raise RuntimeError('service DB role must not be privileged')
-   priv=db.execute("SELECT has_table_privilege(current_user,'rag.chunks','INSERT,UPDATE,DELETE,TRUNCATE') OR has_table_privilege(current_user,'rag.releases','INSERT,UPDATE,DELETE,TRUNCATE') OR has_table_privilege(current_user,'rag.active_release','INSERT,UPDATE,DELETE,TRUNCATE') OR has_function_privilege(current_user,'rag.activate_release(text,text,boolean,boolean)','EXECUTE') OR has_function_privilege(current_user,'rag.stage_release(jsonb,jsonb)','EXECUTE')").fetchone()[0]
-   if priv:raise RuntimeError('service DB role has write or publication privilege')
+   priv_row=db.execute("SELECT has_table_privilege(current_user,'rag.chunks','INSERT,UPDATE,DELETE,TRUNCATE') OR has_table_privilege(current_user,'rag.releases','INSERT,UPDATE,DELETE,TRUNCATE') OR has_table_privilege(current_user,'rag.active_release','INSERT,UPDATE,DELETE,TRUNCATE') OR has_function_privilege(current_user,'rag.activate_release(text,text,boolean,boolean)','EXECUTE') OR has_function_privilege(current_user,'rag.stage_release(jsonb,jsonb)','EXECUTE')").fetchone()
+   if priv_row is None or priv_row[0]:raise RuntimeError('service DB role has write or publication privilege')
   except BaseException:
    db.close();raise
   self.db=db
@@ -60,13 +60,16 @@ class Store:
   # Only internal SELECTs use this helper; materialize before returning so a
   # disconnect during fetch is also retried. Never replay writes or external APIs.
   import psycopg
+  assert not isinstance(self.db,sqlite3.Connection)
   if self.db.closed:self._connect()
+  assert not isinstance(self.db,sqlite3.Connection)
   try:return self.db.execute(sql,params).fetchall()
   except (psycopg.OperationalError,psycopg.InterfaceError) as error:
    state=error.sqlstate or ''
    if not self.db.closed and not state.startswith('08') and state not in {'57P01','57P02','57P03'}:raise
    self.db.close()
    self._connect()
+   assert not isinstance(self.db,sqlite3.Connection)
    # Exactly one retry; outage, invalid role/DSN or second failure propagates.
    return self.db.execute(sql,params).fetchall()
  @serialized

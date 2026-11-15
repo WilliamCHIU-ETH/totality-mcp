@@ -2,7 +2,7 @@
 """Host-only, explicitly executed setup. Generates NEW secrets, never prints them.
 No existing credential is copied. Does not deploy or change networking.
 """
-import os,pathlib,secrets
+import pathlib,secrets
 base=pathlib.Path(__file__).resolve().parent.parent
 base.chmod(0o700)
 d=base/'.secrets';d.mkdir(mode=0o700,exist_ok=True);d.chmod(0o700)

@@ -29,9 +29,11 @@ def run(dsnfile,activate=False,expected_base_release=None,allow_initial=False):
   raise ValueError('video metadata hash mismatch')
  with psycopg.connect(pathlib.Path(dsnfile).read_text().strip()) as db:
   register_vector(db)
-  sealed=db.execute('SELECT rag.stage_release(%s,%s)',(Jsonb(manifest),Jsonb(videos))).fetchone()[0]
+  staged=db.execute('SELECT rag.stage_release(%s,%s)',(Jsonb(manifest),Jsonb(videos))).fetchone()
+  if staged is None:raise RuntimeError('stage_release returned no row')
+  sealed=staged[0]
   if not sealed:
-   for c,vec in zip(chunks,vectors):
+   for c,vec in zip(chunks,vectors,strict=True):
     db.execute('SELECT rag.put_chunk(%s,%s,%s)',(Jsonb(c),' '.join(terms(index_text(c))),vec))
    db.execute('SELECT rag.seal_release(%s)',(manifest['release_id'],))
   if activate:activate_release(db,manifest['release_id'],expected_base_release,allow_initial)
