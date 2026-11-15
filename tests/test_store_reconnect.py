@@ -47,7 +47,7 @@ def test_closed_connection_recovers(pg,operation):
  assert all(any('rolsuper' in q for q in db.calls) and any('has_table_privilege' in q for q in db.calls) for db in created)
 
 def test_inflight_disconnect_retried_once(pg):
- connector,register,created,_=pg;s=store.Store();old=s.db
+ connector,_register,_created,_=pg;s=store.Store();old=s.db
  old.failure=psycopg.OperationalError('synthetic disconnect');s.refresh()
  assert old.closed and s.db is not old and connector.call_count==2
 

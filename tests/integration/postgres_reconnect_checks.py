@@ -8,7 +8,6 @@ import json
 import os
 from pathlib import Path
 import secrets
-import sys
 from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
@@ -79,7 +78,10 @@ class PostgresReconnectTests(unittest.TestCase):
    for operation in ('refresh','rows','get','search','vector'):
     with self.subTest(operation=operation):
      old=s.db;pid=old.info.backend_pid
-     self.assertTrue(self.owner.execute('SELECT pg_terminate_backend(%s)',(pid,)).fetchone()[0])
+     terminated=self.owner.execute('SELECT pg_terminate_backend(%s)',(pid,)).fetchone()
+     self.assertIsNotNone(terminated)
+     assert terminated is not None
+     self.assertTrue(terminated[0])
      if operation=='refresh':s.refresh();self.assertEqual(s.release,self.release)
      elif operation=='rows':self.assertEqual(len(s.rows()),4)
      elif operation=='get':self.assertEqual(s.get(self.chunk['chunk_id'])['chunk_id'],self.chunk['chunk_id'])

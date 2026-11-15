@@ -3,7 +3,7 @@
 No full responses, input text, or credential values are logged. Cache holds only
 content hash, model/dimension and validated float32 vectors.
 """
-import argparse,contextlib,fcntl,json,math,os,pathlib,sqlite3,time
+import argparse,fcntl,json,math,os,pathlib,sqlite3,time
 import httpx,numpy as np
 from common import *
 PRICE=0.02/1_000_000;BUDGET=1.0
@@ -29,42 +29,43 @@ def run(dry=False,cache_only=False):
  if dry:
   db.close();return
  if info['with_three_attempts_usd']>BUDGET:raise RuntimeError('cost hard stop before batch')
- # Read key only for actual requests; never print it or include exception strings.
- if todo and not KEY_PATH:raise ValueError('RAG_OPENAI_KEY_FILE must be explicitly configured')
- key=pathlib.Path(KEY_PATH).read_text().strip() if todo else None
- with (httpx.Client(timeout=90) if todo else contextlib.nullcontext(None)) as client:
-  for start in range(0,len(todo),32):
-   batch=todo[start:start+32];tokens=sum(c['token_count'] for c in batch)
-   for retry in range(3):
-    # Reserve before sending. Interrupted/failed attempts retain reservation.
-    reserve=math.ceil(tokens*1.02)+len(batch)
-    used=db.execute('SELECT COALESCE(SUM(reserved_tokens),0) FROM attempts').fetchone()[0]
-    if (used+reserve)*PRICE>BUDGET:raise RuntimeError('cost hard stop: no request sent')
-    cursor=db.execute('INSERT INTO attempts(reserved_tokens,status) VALUES(?,?)',(reserve,'reserved'));attempt=cursor.lastrowid;db.commit()
-    try:
-     response=client.post('https://api.openai.com/v1/embeddings',headers={'Authorization':'Bearer '+key},json={'model':MODEL,'dimensions':DIM,'encoding_format':'float','input':[c['text'] for c in batch]})
-    except httpx.HTTPError:
-     db.execute('UPDATE attempts SET status=? WHERE id=?',('network_unknown',attempt));db.commit()
-     if retry==2:raise RuntimeError('API network error; details suppressed') from None
-     time.sleep(2**retry+1);continue
-    rid=response.headers.get('x-request-id','')[:200]
-    if response.status_code!=200:
-     db.execute('UPDATE attempts SET status=?,request_id=? WHERE id=?',('http_'+str(response.status_code),rid,attempt));db.commit()
-     if response.status_code not in {429,500,502,503,504} or retry==2:raise RuntimeError('Embedding HTTP '+str(response.status_code)+'; body suppressed')
-     time.sleep(min(60,max(2**retry+1,float(response.headers.get('retry-after','0')) if response.headers.get('retry-after','').isdigit() else 0)));continue
-    payload=response.json();usage=int(payload['usage']['total_tokens'])
-    if usage>reserve:raise RuntimeError('usage exceeds conservative reservation; stop')
-    data=sorted(payload['data'],key=lambda x:x['index'])
-    if len(data)!=len(batch) or [x['index'] for x in data]!=list(range(len(batch))):raise RuntimeError('invalid response count/index')
-    if payload.get('model')!=MODEL:raise RuntimeError('unexpected embedding model')
-    for c,item in zip(batch,data):
-     vec=np.asarray(item['embedding'],dtype='<f4')
-     if vec.shape!=(DIM,) or not np.isfinite(vec).all() or np.linalg.norm(vec)==0:raise RuntimeError('invalid embedding')
-     db.execute('INSERT OR REPLACE INTO cache VALUES(?,?,?,?)',(c['content_sha256'],MODEL,DIM,vec.tobytes()))
-    db.execute('UPDATE attempts SET usage_tokens=?,status=?,request_id=? WHERE id=?',(usage,'ok',rid,attempt));db.commit()
-    del payload,data,response
-    print(json.dumps(dict(completed=min(start+32,len(todo)),remaining_total=len(todo),usage_tokens=usage)),flush=True)
-    time.sleep(0.25);break
+ if todo:
+  key_path=KEY_PATH
+  if not key_path:raise ValueError('RAG_OPENAI_KEY_FILE must be explicitly configured')
+  key=pathlib.Path(key_path).read_text().strip()
+  with httpx.Client(timeout=90) as client:
+   for start in range(0,len(todo),32):
+    batch=todo[start:start+32];tokens=sum(c['token_count'] for c in batch)
+    for retry in range(3):
+     # Reserve before sending. Interrupted/failed attempts retain reservation.
+     reserve=math.ceil(tokens*1.02)+len(batch)
+     used=db.execute('SELECT COALESCE(SUM(reserved_tokens),0) FROM attempts').fetchone()[0]
+     if (used+reserve)*PRICE>BUDGET:raise RuntimeError('cost hard stop: no request sent')
+     cursor=db.execute('INSERT INTO attempts(reserved_tokens,status) VALUES(?,?)',(reserve,'reserved'));attempt=cursor.lastrowid;db.commit()
+     try:
+      response=client.post('https://api.openai.com/v1/embeddings',headers={'Authorization':'Bearer '+key},json={'model':MODEL,'dimensions':DIM,'encoding_format':'float','input':[c['text'] for c in batch]})
+     except httpx.HTTPError:
+      db.execute('UPDATE attempts SET status=? WHERE id=?',('network_unknown',attempt));db.commit()
+      if retry==2:raise RuntimeError('API network error; details suppressed') from None
+      time.sleep(2**retry+1);continue
+     rid=response.headers.get('x-request-id','')[:200]
+     if response.status_code!=200:
+      db.execute('UPDATE attempts SET status=?,request_id=? WHERE id=?',('http_'+str(response.status_code),rid,attempt));db.commit()
+      if response.status_code not in {429,500,502,503,504} or retry==2:raise RuntimeError('Embedding HTTP '+str(response.status_code)+'; body suppressed')
+      time.sleep(min(60,max(2**retry+1,float(response.headers.get('retry-after','0')) if response.headers.get('retry-after','').isdigit() else 0)));continue
+     payload=response.json();usage=int(payload['usage']['total_tokens'])
+     if usage>reserve:raise RuntimeError('usage exceeds conservative reservation; stop')
+     data=sorted(payload['data'],key=lambda x:x['index'])
+     if len(data)!=len(batch) or [x['index'] for x in data]!=list(range(len(batch))):raise RuntimeError('invalid response count/index')
+     if payload.get('model')!=MODEL:raise RuntimeError('unexpected embedding model')
+     for c,item in zip(batch,data,strict=True):
+      vec=np.asarray(item['embedding'],dtype='<f4')
+      if vec.shape!=(DIM,) or not np.isfinite(vec).all() or np.linalg.norm(vec)==0:raise RuntimeError('invalid embedding')
+      db.execute('INSERT OR REPLACE INTO cache VALUES(?,?,?,?)',(c['content_sha256'],MODEL,DIM,vec.tobytes()))
+     db.execute('UPDATE attempts SET usage_tokens=?,status=?,request_id=? WHERE id=?',(usage,'ok',rid,attempt));db.commit()
+     del payload,data,response
+     print(json.dumps(dict(completed=min(start+32,len(todo)),remaining_total=len(todo),usage_tokens=usage)),flush=True)
+     time.sleep(0.25);break
  # Export deterministically, mapping evidence identities to text-shared cache.
  vectors=[];ids=[]
  for c in chunks:

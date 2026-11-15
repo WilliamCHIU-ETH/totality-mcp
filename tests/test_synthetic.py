@@ -1,5 +1,5 @@
 """CPU-light regression tests using only invented numbered test sentences."""
-import json,pathlib,sqlite3,sys,threading
+import json,sqlite3,threading
 import numpy as np,pytest
 import common,build,store,query_embed,server
 from synthetic import make_source,add_vectors,CharacterTokenizer
@@ -62,7 +62,7 @@ def test_partial_and_vector_signals(sample):
  finally:s.db.close()
 
 def test_pending_and_quality_evidence(sample):
- source,data,chunks=sample
+ source,_data,chunks=sample
  cards=json.loads((source/'context/pending.json').read_text())
  for i in [0,2]:
   c=chunks[i];assert c['pending'][0]['alternatives']==cards[i//2]['alternatives']
@@ -81,7 +81,7 @@ def test_character_split_boundaries():
  assert all(text[a:b]==t and len(t)<=32 for a,b,t in parts)
 
 def test_source_tamper_rejected(sample):
- source,data,_=sample
+ source,_data,_=sample
  (source/'context/videos/FAKEVID0001/segments.json').write_text('[]')
  with pytest.raises(ValueError,match='stage-one source mismatch'):build.build(source)
 
@@ -339,7 +339,7 @@ def test_probe_configured_gateway_is_used(monkeypatch,capsys):
  seen=[]
  class Reply(BytesIO):
   status=200
-  headers={'cache-control':'no-store'}
+  def __init__(self,*args,**kwargs):super().__init__(*args,**kwargs);self.headers={'cache-control':'no-store'}
  def respond(request,**kwargs):
   seen.append(request.full_url)
   if request.full_url.endswith('/authorize'):

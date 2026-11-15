@@ -33,7 +33,7 @@ def section(title):
 
 
 def git(*args):
-    p = subprocess.run(["git", "-C", str(ROOT), *args], capture_output=True, text=True, timeout=15)
+    p = subprocess.run(["git", "-C", str(ROOT), *args], check=False, capture_output=True, text=True, timeout=15)
     return p.returncode, (p.stdout or p.stderr).strip()
 
 
@@ -189,7 +189,7 @@ def probe_host_sot():
     try:
         data = json.loads(sot_file.read_text(errors="replace"))
         updated = datetime.datetime.fromisoformat(data["updated_at"].replace("Z", "+00:00"))
-        age_min = (datetime.datetime.now(datetime.timezone.utc) - updated).total_seconds() / 60
+        age_min = (datetime.datetime.now(datetime.UTC) - updated).total_seconds() / 60
         stale = age_min > data.get("stale_after_minutes", 15)
         print(f"updated_at: {data['updated_at']} (age={age_min:.1f}m -> {'STALE' if stale else 'FRESH'})")
         for cname, cinfo in sorted(data.get("containers", {}).items()):
